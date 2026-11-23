@@ -1,7 +1,8 @@
 # STATUS
 
 Phase 1 complete: scaffold, generator, verifier, docs, defect fixes and a full dynamic
-end-to-end acceptance run.
+end-to-end acceptance run. Phase 2: the harness runs on Docker **or** Podman (rootless
+included), with a real 8/8 solve under Podman.
 
 ## Done
 
@@ -17,6 +18,10 @@ end-to-end acceptance run.
 - T04: read-only acceptance review (`.agent/reports/T04-review.md`).
 - T05: all review findings fixed; `make test` and the full dynamic acceptance run executed;
   real `docs/walkthrough.md` written. Details: `.agent/reports/T05-fix-verify.md`.
+- T06: read-only static recheck (`.agent/reports/T06-final-review.md`).
+- T07: Docker/Podman engine abstraction in the `Makefile` (`ENGINE`, auto-detected), docs
+  updated, Podman 6.2.0 installed rootless, and both engines verified live.
+  Details: `.agent/reports/T07-podman.md`.
 
 ## Fixes landed in T05
 
@@ -36,7 +41,7 @@ end-to-end acceptance run.
 - Docs: `docs/walkthrough.md` (spoiler-free tour of all 16 templates), README accuracy
   (hints, toolbox/network wording, loopback-only port), PLAN state layout and task table.
 
-## Verification (2026-11-23, this host, Docker 29.9.3)
+## Verification — Docker (T05, 2026-11-23, Docker 29.9.3)
 
 - `sh tests/smoke.sh`: 111 assertions, 0 failures (includes the new double-`finish` guard).
 - `make up SEED=4242 SET=8` → container inspected: bash/tmux/nano/grep/tree/less/diff/gawk/
@@ -53,6 +58,40 @@ end-to-end acceptance run.
   different seed → different selection and order.
 - `make test`: up/down cycle with a clean tree after commit.
 
+## Verification — Docker + Podman (T07, 2026-11-23)
+
+Host: CachyOS, kernel 7.3.3, Docker 29.9.3 (rootful daemon) and Podman 6.2.0 (rootless;
+`podman info` maps 0→1000 plus 1→100000:65536, overlay graph driver, netavark). Podman was
+installed with `pacman -S podman`; `/etc/subuid` and `/etc/subgid` already carried
+`lstama:100000:65536` and `newuidmap`/`newgidmap` carry `cap_setuid`/`cap_setgid`, so no
+other system configuration was changed.
+
+- `make test` (auto-detected podman, `PORT=2223`) and `make test ENGINE=docker PORT=2224`
+  both end with `==> OK: image builds, container runs, tree is clean`.
+- `make up PORT=2223` under Podman builds the unchanged `Dockerfile` with buildah 1.46
+  (both stages, `ssh-keygen -A` included), starts the container, reads the stage list back
+  and publishes `127.0.0.1:2223->22/tcp`; `ss -ltn` shows the listener on `127.0.0.1:2223`
+  only (rootless forwarder, no 0.0.0.0 bind). `.dockerignore` is honoured by buildah.
+- Inside the Podman container: `verify` is `-rwsr-xr-x root root`; `/var/lib/sre-trainer/
+  manifest` gives `Permission denied` for uid 1000; `podman exec -u 1000` reports
+  `uid=1000(trainee)` while `podman exec` (default) reports `uid=0(root)`.
+- Real SSH password session from the host to `127.0.0.1:2223` as `trainee` (non-interactive
+  with `SSH_ASKPASS`+`setsid`, same `ssh` flags as `make ssh`): `id` → trainee,
+  `verify next` prints the stage brief, `verify status`, `verify hint`, a wrong answer
+  rejected with rc 1, a correct check accepted, `verify stage` produced
+  `FLAG{18882a3da581}`, `verify unlock` advanced to stage 2.
+- Full 8/8 solve as uid 1000 under Podman (seed 4242, order conf-hunt … deploy-error): 77
+  asserted steps, 0 failures — every hash and file check (20 000-line line replacement,
+  CRLF fix, config-drift restore, cut-paste reorder written byte-exact through stdin),
+  repeat-check rejection, wrong-flag rejection, all stage flags parsed and matched, `finish`
+  accepted then refused on repeat.
+- `make status`, `make down` (record copied to `state/records.jsonl`), `make clean`
+  (container + image removed, `.instance/` and `state/` deleted) and a fresh
+  `make up SEED=4243` (new stage order) all work under Podman; `git status --porcelain`
+  stayed empty throughout.
+- Record copied out by `make down`:
+  `{"epoch":1795433936,"elapsed_seconds":7,"seed":4242,"stages":["conf-hunt", … ]}`.
+
 ## Key decisions
 
 - Alpine patch pinned to `3.24.4`; streaming `latest` is not acceptable for reproducible
@@ -66,12 +105,29 @@ end-to-end acceptance run.
 - Records live at `/var/lib/sre-trainer/state/records.jsonl` and are copied to
   `state/records.jsonl` by `make down` (each `down` replaces the host copy; see PLAN open
   questions).
-- sshd is reachable on loopback only: the container listens on 0.0.0.0:22 (needed for
-  Docker's port forwarding) and the host publish is `127.0.0.1:PORT`.
+- sshd is reachable on loopback only: the container listens on 0.0.0.0:22 (needed for the
+  engine's port forwarding) and the host publish is `127.0.0.1:PORT`.
+- **One engine switch**: `ENGINE ?= $(shell … podman … docker)` in the `Makefile`; every
+  target uses `$(ENGINE)` and both CLIs accept the exact flags used
+  (`build --build-arg`, `run -d -p`, `exec`, `ps --filter/--format`, `logs`, `inspect`,
+  `cp`, `image inspect`, `rm -f`, `rmi -f`), so no engine-specific branches were added.
+  A rootless Podman container maps container-root into the user namespace, where the 4755
+  verifier still reaches root-owned stage data — no change to the security model.
 
 ## Pending / notes
 
-- `docker logs` shows `Unsupported option UsePAM` from Alpine's non-PAM sshd; `UsePAM no`
-  is ignored there and password auth works (left as documentation of intent).
+- `docker logs` (and `podman logs`) shows `Unsupported option UsePAM` from Alpine's
+  non-PAM sshd; `UsePAM no` is ignored there and password auth works (left as
+  documentation of intent).
 - Host `state/records.jsonl` holds the most recent container's records only; merging runs
-  across sessions is an open question in `PLAN.md`.
+  across sessions is an open question in `PLAN.md`. A `make down` of a container that never
+  reached the final flag still replaces the host copy with the (empty) container file.
+- **Stale Docker Hub credential (host, not the repo)**: Podman reads
+  `~/.docker/config.json`, so an expired `index.docker.io` entry makes the pull fail with
+  `unauthorized: incorrect username or password` where Docker silently falls back to an
+  anonymous pull. On this host the Podman runs used `REGISTRY_AUTH_FILE` pointing at an
+  empty auth file; the stored entry should be refreshed with `podman login docker.io` or
+  removed. README troubleshooting documents this.
+- Podman tags images under `localhost/`, so `make status` shows
+  `localhost/sre-terminal-trainer:local` where Docker shows `sre-terminal-trainer:local`
+  (cosmetic; `make up/down/test` all work with the plain tag).

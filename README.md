@@ -1,14 +1,14 @@
 # sre-terminal-trainer
 
-A disposable Docker container that drops you into a randomised set of **SRE terminal
-drills** — log triage, config fixes, permission audits, editors, pipes, tmux — and a small
-`verify` helper that checks your answers, hands out fragments, and turns them into flags
-that unlock the next stage.
+A disposable Docker **or Podman** container that drops you into a randomised set of **SRE
+terminal drills** — log triage, config fixes, permission audits, editors, pipes, tmux — and
+a small `verify` helper that checks your answers, hands out fragments, and turns them into
+flags that unlock the next stage.
 
 Everything runs locally. Nothing is sent anywhere.
 
 > **Spoiler policy.** This README never describes a challenge or an answer. The answer
-> key is generated inside the Docker *build* stage and is deleted before the runtime
+> key is generated inside the container *build* stage and is deleted before the runtime
 > image is assembled: the image only ever contains hashes, so nothing in the repo or the
 > image tells you what to type.
 
@@ -27,10 +27,24 @@ Everything runs locally. Nothing is sent anywhere.
 
 ## Requirements
 
-- Docker (Linux or macOS; tested with Docker 29).
+- Docker (Linux or macOS; tested with Docker 29) **or** Podman (Linux; tested with Podman
+  6.2 rootless; Podman 4 or newer). Nothing in the Makefile is specific to one of them, and
+  rootless Podman needs no special setup beyond the usual `subuid`/`subgid` ranges.
 - GNU `make` and `python3` on the host (used for random credentials and to summarise your
   records — nothing else).
 - A free local port (default `2222`).
+
+The container engine is auto-detected: **`podman` when it is on `PATH`, otherwise
+`docker`**. Either engine can be forced per invocation:
+
+```sh
+make up                  # podman if installed, else docker
+make up ENGINE=podman    # always podman
+make up ENGINE=docker    # always docker
+```
+
+Every target honours `ENGINE` (it is exported to the recursive `make` calls of `new` and
+`test`), so `make down ENGINE=docker` talks to the same engine that ran `make up`.
 
 ## Quick start
 
@@ -74,9 +88,10 @@ Start a completely new challenge set with `make new` (down + fresh seed).
 | `make test` | One up/down cycle, then assert the working tree is still clean. |
 | `make clean` | Remove the container, the image, `.instance/` and `state/`. |
 
-Variables: `IMAGE`, `CONTAINER`, `PORT`, `SET` (stages per run, default 8), `SEED`,
-`SSH_USER`. A given `SEED` always produces the same challenge set, so `make up SEED=1234`
-replays a run; `make new` picks a new seed for you.
+Variables: `ENGINE` (`podman` or `docker`, auto-detected as described above), `IMAGE`,
+`CONTAINER`, `PORT`, `SET` (stages per run, default 8), `SEED`, `SSH_USER`. A given `SEED`
+always produces the same challenge set, so `make up SEED=1234` replays a run; `make new`
+picks a new seed for you.
 
 ## Local state
 
@@ -91,8 +106,8 @@ Only sources, config and docs are tracked; see `.gitignore` and `.dockerignore`.
 ## How it fits together
 
 ```
-host                          Docker build (builder stage)          runtime image
-----                          -----------------------------          -------------
+host                          container build (builder stage)       runtime image
+----                          -------------------------------       -------------
 make up SEED=… SET=…   ───▶   generator/generate.py ──▶ /generated/  ──▶ challenges at their
                               src/verify.c ──▶ static binary           absolute paths
                                                                        /usr/local/bin/verify (4755)
@@ -100,6 +115,9 @@ make up SEED=… SET=…   ───▶   generator/generate.py ──▶ /gener
                                                                          stages/, final.sha256, state/}
                                                                        sshd + entrypoint.sh
 ```
+
+The image is built from the repository's `Dockerfile`; Podman's buildah reads the same file
+and honours `.dockerignore` identically, so both engines produce the same image.
 
 - `generator/generate.py` runs **only** at build time and writes the challenge files, the
   stage texts, the check definitions and the flag hashes. Its `--dump-answers` output is
@@ -120,6 +138,17 @@ teaches and how to approach it without giving any answers away.
 
 - **`port is already in use`** — pick another host port: `make up PORT=2223`.
 - **`permission denied` talking to Docker** — your user is not in the `docker` group.
+- **`permission denied` talking to Podman** — rootless Podman refuses to map container
+  users when the host has no `subuid`/`subgid` ranges for you; check with `podman unshare
+  id`, then add `<user>:100000:65536` to `/etc/subuid` and `/etc/subgid` and run `podman
+  system migrate` once.
+- **Podman says `unauthorized: incorrect username or password` while pulling** — a stale
+  Docker Hub login in `~/.docker/config.json` (Docker silently falls back to an anonymous
+  pull, Podman does not). Run `podman login docker.io`, remove the stale entry from that
+  file, or point `REGISTRY_AUTH_FILE` at an empty auth file.
+- **`no container named …` after switching engines** — `make down`/`make status`/`make
+  clean` only see the engine they talk to; add `ENGINE=docker` or `ENGINE=podman` to match
+  the engine that started the container.
 - **Container exits immediately** — `make up` prints the last log lines; the entrypoint
   refuses to start without `SSH_PASSWORD`.
 - **Want the challenge set back after editing files** — `make down && make up` rebuilds a
@@ -130,7 +159,8 @@ teaches and how to approach it without giving any answers away.
 Password authentication with a throwaway container is deliberate: it keeps the session
 realistic. `make up` publishes the port on `127.0.0.1` only (loopback), so the sshd is not
 reachable from the network; keep it that way, and do not reuse `.instance/creds` anywhere
-else.
+else. The publish is identical for both engines, including rootless Podman, where the
+forwarder runs as your own user.
 
 ## License
 
