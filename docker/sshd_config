@@ -1,0 +1,19 @@
+# sre-terminal-trainer sshd configuration.
+# Password login only, inside a throwaway container that is normally published
+# on a loopback/host port. Never expose this port to an untrusted network.
+
+Port 22
+ListenAddress 0.0.0.0
+
+PermitRootLogin no
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+UsePAM no
+UseDNS no
+
+PrintMotd no
+X11Forwarding no
+MaxAuthTries 6
+ClientAliveInterval 60
+
+Subsystem sftp internal-sftp

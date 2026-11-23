@@ -1,0 +1,10 @@
+.git
+.agent
+.notes
+state
+.instance
+__pycache__
+bin
+build
+dist
+*.log
