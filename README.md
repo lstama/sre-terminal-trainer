@@ -15,8 +15,9 @@ Everything runs locally. Nothing is sent anywhere.
 ## What you get
 
 - A container with `bash`, `tmux`, `nano`, `less`, `tree`, `grep`, `gawk`, `coreutils`,
-  `diffutils` and `findutils` — the toolbox the drills expect, and nothing else (no
-  `sudo`, no compilers, no network tooling).
+  `diffutils` and `findutils` — the toolbox the drills expect, and nothing the trainee can
+  use to escalate: no `sudo`, no compilers, no root access (the OpenSSH client is present
+  only because sshd ships with it; no drill needs the network).
 - A fresh, seeded set of challenges on every build: files under `/home/trainee` (yours to
   edit) and read-only inputs elsewhere.
 - `verify` — a setuid helper that prints the current stage brief, hints, checks one answer
@@ -43,7 +44,7 @@ Inside the session:
 ```sh
 verify next      # show the current stage
 verify status    # stage, elapsed time, checks done
-verify hint      # hint tier 1..3 for this stage
+verify hint      # this stage's hints (3 lines, then one per check), a page at a time
 verify check <check-id> <answer>
 verify stage     # once every check in the stage passes, earn the stage flag
 verify unlock <flag>
@@ -65,7 +66,7 @@ Start a completely new challenge set with `make new` (down + fresh seed).
 | Target | What it does |
 |---|---|
 | `make up [SEED=N] [SET=N] [PORT=N]` | Generate credentials if needed, build the image with `--build-arg SEED/SET`, start the container, print seed, port, credentials and the stage list. |
-| `make ssh` | SSH to `localhost:$PORT` with host-key checking disabled (throwaway container) and the credentials from `.instance/creds`. |
+| `make ssh` | SSH to `127.0.0.1:$PORT` with host-key checking disabled (throwaway container) and the credentials from `.instance/creds`. |
 | `make status` | Container state, credentials path, seed, port and saved records. |
 | `make down` | Copy `/var/lib/sre-trainer/state/records.jsonl` into `state/`, then stop and remove the container. |
 | `make new` | `down`, then `up` with a fresh random seed. |
@@ -112,7 +113,8 @@ make up SEED=… SET=…   ───▶   generator/generate.py ──▶ /gener
 ## Walkthrough
 
 A guided, spoiler-free walkthrough of a full run (from `make up` to the final flag) lives
-at [docs/walkthrough.md](docs/walkthrough.md) — *to be filled in later*.
+at [docs/walkthrough.md](docs/walkthrough.md): the session mechanics, plus what each drill
+teaches and how to approach it without giving any answers away.
 
 ## Troubleshooting
 
@@ -126,8 +128,9 @@ at [docs/walkthrough.md](docs/walkthrough.md) — *to be filled in later*.
 ## Security note
 
 Password authentication with a throwaway container is deliberate: it keeps the session
-realistic. The port is published on the host; do not publish it on an untrusted network,
-and do not reuse `.instance/creds` anywhere else.
+realistic. `make up` publishes the port on `127.0.0.1` only (loopback), so the sshd is not
+reachable from the network; keep it that way, and do not reuse `.instance/creds` anywhere
+else.
 
 ## License
 

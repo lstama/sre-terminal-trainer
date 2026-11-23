@@ -79,7 +79,7 @@ up:
 	docker build --build-arg SEED="$$seed" --build-arg SET='$(SET)' -t '$(IMAGE)' .
 	docker rm -f '$(CONTAINER)' >/dev/null 2>&1 || true
 	printf '==> starting %s (port %s)\n' '$(CONTAINER)' '$(PORT)'
-	docker run -d --name '$(CONTAINER)' -p '$(PORT)':22 \
+	docker run -d --name '$(CONTAINER)' -p '127.0.0.1:$(PORT)':22 \
 	  -e SSH_USER="$$user" -e SSH_PASSWORD="$$password" '$(IMAGE)' >/dev/null
 	if ! docker ps --filter 'name=^$(CONTAINER)$$' --format '{{.Names}}' | grep -q .; then
 	  echo 'error: the container exited immediately; last log lines:' >&2
@@ -91,12 +91,21 @@ up:
 	  if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(1); sys.exit(0 if s.connect_ex(('127.0.0.1',$(PORT)))==0 else 1)"; then break; fi
 	  i=$$((i+1)); sleep 0.5
 	done
-	stages=$$(docker exec '$(CONTAINER)' sh -c 'grep "^STAGE " /var/lib/sre-trainer/manifest | cut -d" " -f2' || true)
+	if ! stages=$$(docker exec '$(CONTAINER)' sh -c 'grep "^STAGE " /var/lib/sre-trainer/manifest | cut -d" " -f2'); then
+	  echo 'error: could not read the stage list from the container' >&2
+	  docker logs '$(CONTAINER)' 2>&1 | tail -n 20 >&2 || true
+	  exit 1
+	fi
+	if [ -z "$$stages" ]; then
+	  echo 'error: the container reports no stages; check the generator output' >&2
+	  exit 1
+	fi
 	printf '\n  seed     : %s\n  set      : %s\n  port     : %s\n  user     : %s\n  password : %s\n' \
 	  "$$seed" '$(SET)' '$(PORT)' "$$user" "$$password"
+	printf '\n  bound to : 127.0.0.1:%s (loopback only)\n' '$(PORT)'
 	printf '\n  stages (%s):\n' "$$(printf "%s\n" "$$stages" | grep -c . || true)"
 	printf '%s\n' "$$stages" | sed 's/^/    - /'
-	printf '\n  Log in with: make ssh   (or ssh -p %s %s@localhost)\n\n' '$(PORT)' "$$user"
+	printf '\n  Log in with: make ssh   (or ssh -p %s %s@127.0.0.1)\n\n' '$(PORT)' "$$user"
 
 down:
 	@mkdir -p $(STATE)
@@ -115,9 +124,9 @@ down:
 ssh:
 	@if [ ! -s $(CREDS) ]; then echo 'error: no credentials; run make up first' >&2; exit 1; fi
 	user=$$(sed -n 's/^SSH_USER=//p' $(CREDS))
-	printf '==> ssh -p %s %s@localhost (type the password from make up)\n' '$(PORT)' "$$user"
+	printf '==> ssh -p %s %s@127.0.0.1 (type the password from make up)\n' '$(PORT)' "$$user"
 	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-	  -p '$(PORT)' "$$user@localhost"
+	  -p '$(PORT)' "$$user@127.0.0.1"
 	printf '==> session ended; make down saves the records\n'
 
 new:

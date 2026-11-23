@@ -245,18 +245,55 @@ def t_deploy_error(rng, fs):
 @template("top-talker")
 def t_top_talker(rng, fs):
     logp = "/var/log/sre/access-" + tok(rng, "a", 8) + ".log"
-    frag = tok(rng, "sess")
-    topn = rng.randint(380, 520)
     total = 20000
+    topn = rng.randint(1500, 1900)
     topip = ip(rng)
-    others = [ip(rng) for _ in range(14)]
-    pool = []
-    for _ in range(topn):
-        pool.append((topip, frag))
-    for _ in range(total - topn):
-        pool.append((rng.choice(others), None))
-    rng.shuffle(pool)
-    wfile(fs, logp, "\n".join(access_line(rng, c, f) for c, f in pool) + "\n")
+    # Decoy clients: distinct IPs, each with strictly fewer requests than the
+    # top talker.  The drill is "find the IP with the most requests", so the
+    # invariant below is load-bearing: it is re-derived from the written log
+    # before the answers are accepted as correct.
+    seen = {topip}
+    others = []
+    n_others = rng.randint(30, 45)
+    while len(others) < n_others:
+        cand = ip(rng)
+        if cand in seen:
+            continue
+        seen.add(cand)
+        others.append(cand)
+    rest = total - topn
+    base, extra = divmod(rest, len(others))
+    counts = [base + (1 if i < extra else 0) for i in range(len(others))]
+    rng.shuffle(counts)
+    if max(counts) >= topn:
+        raise AssertionError(
+            "top-talker: decoy count %d would tie/beat the top talker %d"
+            % (max(counts), topn))
+    rows = [topip] * topn
+    for client, n in zip(others, counts):
+        rows.extend([client] * n)
+    rng.shuffle(rows)
+    wfile(fs, logp, "\n".join(access_line(rng, c) for c in rows) + "\n")
+
+    # Self-check: recompute the winner from the log bytes on disk and compare
+    # it with the answers below, so a generated drill can never disagree with
+    # the file the trainee is told to analyse.
+    counted = {}
+    with open(os.path.join(fs, logp.lstrip("/")), "r", encoding="utf-8") as fh:
+        for line in fh:
+            if line.strip():
+                client = line.split()[0]
+                counted[client] = counted.get(client, 0) + 1
+    winner = max(counted.items(), key=lambda kv: kv[1])
+    if len(counted) != len(others) + 1:
+        raise AssertionError("top-talker: expected %d clients, log has %d"
+                             % (len(others) + 1, len(counted)))
+    if winner != (topip, topn):
+        raise AssertionError("top-talker: log winner %r != stored answer %r"
+                             % (winner, (topip, topn)))
+    if sum(counted.values()) != total:
+        raise AssertionError("top-talker: log has %d lines, expected %d"
+                             % (sum(counted.values()), total))
     checks = [
         hash_check("top-talker-1", topip, "Identify the source IP with the most requests and submit it."),
         hash_check("top-talker-2", str(topn), "Count requests from that top talker IP and submit the number.", plain=str(topn)),
@@ -498,7 +535,9 @@ def t_copy_mode(rng, fs):
 @template("log-growth")
 def t_log_growth(rng, fs):
     root = "/var/log/sre/growth-" + tok(rng, "g", 8)
-    sizes = [1200, 2600, 4300, 7800]
+    # Distinct sizes drawn per seed so both the winning filename and the line
+    # count answer change between runs.
+    sizes = rng.sample(range(1200, 9900, 100), 4)
     rng.shuffle(sizes)
     frag = tok(rng, "big")
     paths = []
@@ -538,30 +577,38 @@ def t_config_drift(rng, fs):
     base_lines = [
         "# application configuration", "bind_port = 8080",
         "pool_size = 24", "upstream_host = %s" % frag1,
-        "retry_count = 3", "# baseline-ref %s" % frag2, "log_level = warn",
+        "retry_count = 3", "log_level = warn",
     ]
     fixed = "\n".join(base_lines) + "\n"       # expected corrected bytes, in memory only
     drift_lines = list(base_lines)
     drift_lines[3] = "upstream_host = old.internal.example"
     broken = "\n".join(drift_lines) + "\n"
     wfile(fs, cfg, broken)                      # checked path: ships BROKEN (drifted)
-    # The backup keeps the correct host + baseline token but has its own header, so the
-    # exact expected bytes are never shipped as any fs file.
+    # The backup is a pristine snapshot: correct host plus a baseline reference
+    # token that the shipped app.conf does not carry, so "only in the backup"
+    # is literally true (asserted below).  Its header differs, so the exact
+    # expected bytes are never shipped as any fs file either.
     bak_lines = list(base_lines)
     bak_lines[0] = "# application configuration (backup snapshot)"
-    wfile(fs, bak, "\n".join(bak_lines) + "\n")
+    bak_lines.insert(5, "# baseline-ref %s" % frag2)
+    bak_content = "\n".join(bak_lines) + "\n"
+    wfile(fs, bak, bak_content)
+    if frag2 in broken or frag2 not in bak_content:
+        raise AssertionError("config-drift: baseline token must be unique to the backup")
+    if bak_content == fixed:
+        raise AssertionError("config-drift: backup must not equal the expected app.conf")
     checks = [
         file_check("config-drift-1", cfg, fixed, frag1,
                    "Restore the drifted upstream_host line in app.conf from the backup.", initial=broken),
-        hash_check("config-drift-2", frag2, "Submit the baseline reference token found only in the backup."),
+        hash_check("config-drift-2", frag2, "Submit the baseline reference token, which is kept only in the backup."),
     ]
     instr = (
         "The config %s drifted from the reference backup %s. Run diff on the two files. "
         "The corrected end state for %s is: keep its own `# application configuration` "
         "header and every other line unchanged, and replace only the drifted "
         "upstream_host line with the value shown in the backup (`upstream_host = %s`). "
-        "Do not copy the backup's header. Report the baseline reference token kept in "
-        "the backup too." % (cfg, bak, cfg, frag1)
+        "Do not copy the backup's header or its extra baseline-ref line. Report the "
+        "baseline reference token kept only in the backup too." % (cfg, bak, cfg, frag1)
     )
     hints = [
         "Tier 1: diff <broken> <backup> prints only the differing lines with < and > markers.",
@@ -601,9 +648,12 @@ def t_live_tail(rng, fs):
 def t_perm_audit(rng, fs):
     root = "/home/trainee/perm-" + tok(rng, "p", 8)
     frag1, frag2 = tok(rng, "cred"), tok(rng, "key")
+    cred_name = rng.choice(["secrets.env", "vault.env", "svc-token.env",
+                            "auth.env", "api-keys.env", "credentials.cfg"])
     specs = [
-        ("public.txt", 0o644), ("run.sh", 0o755), ("secrets.env", 0o600),
-        ("group.cfg", 0o640), ("world.txt", 0o777), ("readonly.key", 0o400),
+        ("public.txt", 0o644), ("run.sh", 0o755), ("group.cfg", 0o640),
+        ("world.txt", 0o777), ("readonly.key", 0o400), ("notes.txt", 0o644),
+        (cred_name, 0o600),
     ]
     rng.shuffle(specs)
     credpath = None
@@ -888,16 +938,174 @@ def write_outputs(seed, count, out, dump_path):
     return stages, order, final_flag
 
 
+# ---------------------------------------------------------------------------
+# self-test: re-derive every answer from the generated artefacts
+# ---------------------------------------------------------------------------
+
+def self_test(seeds, verbose=True):
+    """Generate a full 16-stage set per seed and cross-foot answers against disk.
+
+    The templates assert their own load-bearing invariants while generating (e.g.
+    ``top-talker`` re-reads its log and computes the busiest client).  This routine
+    adds the independent, generator-wide checks: flag formula vs ``checks.tsv``
+    order, file checks not shipped pre-solved, no answer dump under ``fs/``, and the
+    two drill-specific claims (top talker, config-drift baseline token).
+    """
+    import re
+    import tempfile
+
+    failures = []
+
+    def check(cond, msg):
+        if not cond:
+            failures.append(msg)
+            print("SELFTEST FAIL: %s" % msg, file=sys.stderr)
+
+    top_re = re.compile(r"(/var/log/sre/access-[^\s]+\.log)")
+    drift_re = re.compile(r"(/home/trainee/drift-[^\s]+)/app\.conf")
+
+    for seed in seeds:
+        with tempfile.TemporaryDirectory(prefix="sre-selftest.") as tmp:
+            fsroot = os.path.join(tmp, "fs")
+            dump_path = os.path.join(tmp, "answers.json")
+            stages, order, final_flag = write_outputs(seed, len(ALL_IDS), tmp, dump_path)
+
+            with open(dump_path, "r", encoding="utf-8") as fh:
+                dump = json.load(fh)
+
+            check(len(order) == len(ALL_IDS) == len(set(order)),
+                  "seed %d: stage selection is not a full unique set" % seed)
+            check(dump["order"] == order, "seed %d: dump order differs from build order" % seed)
+            check(dump["final_flag"] == final_flag == stages[-1]["flag"],
+                  "seed %d: final flag is not the last stage flag" % seed)
+            check(dump["set"] == len(ALL_IDS), "seed %d: dump set size" % seed)
+
+            with open(os.path.join(tmp, "manifest"), "r", encoding="utf-8") as fh:
+                manifest = fh.read().splitlines()
+            check(manifest[0] == "SEED %d" % seed, "seed %d: manifest seed" % seed)
+            check(manifest[1] == "STAGES %d" % len(stages), "seed %d: manifest stage count" % seed)
+            check(manifest[2:] == ["STAGE " + s["id"] for s in stages],
+                  "seed %d: manifest stage order" % seed)
+
+            for idx, stage in enumerate(stages, 1):
+                sd = os.path.join(tmp, "stages", "%02d" % idx)
+                with open(os.path.join(sd, "instruction"), "r", encoding="utf-8") as fh:
+                    instr = fh.read()
+                with open(os.path.join(sd, "hint"), "r", encoding="utf-8") as fh:
+                    hint = fh.read()
+                with open(os.path.join(sd, "flag.sha256"), "r", encoding="utf-8") as fh:
+                    flag_digest = fh.read().strip()
+
+                check(hint.strip() != "", "seed %d %s: empty hint file" % (seed, stage["id"]))
+                check(flag_digest == sha_text(stage["flag"]),
+                      "seed %d %s: flag.sha256 does not match the stage flag" % (seed, stage["id"]))
+                check(stage["flag"].startswith("FLAG{") and len(stage["flag"]) == 18,
+                      "seed %d %s: malformed flag" % (seed, stage["id"]))
+
+                for c in stage["checks"]:
+                    check(c["id"] in instr, "seed %d: instruction omits check id %s" % (seed, c["id"]))
+
+                # checks.tsv: fragment order defines the flag; file checks must be broken.
+                with open(os.path.join(sd, "checks.tsv"), "r", encoding="utf-8") as fh:
+                    blocks = [b for b in fh.read().split("\n\n") if b.strip()]
+                check(len(blocks) == len(stage["checks"]),
+                      "seed %d %s: checks.tsv block count" % (seed, stage["id"]))
+                frags = []
+                for block in blocks:
+                    kv = {}
+                    for line in block.splitlines():
+                        k, _, v = line.partition("=")
+                        kv[k] = v
+                    frags.append(kv.get("fragment", ""))
+                    if kv.get("type") == "file":
+                        shipped = os.path.join(fsroot, kv["path"].lstrip("/"))
+                        with open(shipped, "rb") as fh:
+                            data = fh.read()
+                        check(sha_bytes(data) != kv["sha256"],
+                              "seed %d %s: %s ships already solved" % (seed, stage["id"], kv["id"]))
+                    elif kv.get("type") == "hash":
+                        check(re.fullmatch(r"[0-9a-f]{64}", kv.get("answer", "")) is not None,
+                              "seed %d %s: %s answer is not a sha256 digest"
+                              % (seed, stage["id"], kv["id"]))
+                check(("FLAG{" + sha_text("|".join(frags))[:12] + "}") == stage["flag"],
+                      "seed %d %s: flag formula/order mismatch" % (seed, stage["id"]))
+
+                # top-talker: re-derive the winner and its count from the log on disk.
+                if stage["id"] == "top-talker":
+                    m = top_re.search(instr)
+                    check(m is not None, "seed %d: top-talker log path not in instruction" % seed)
+                    if m:
+                        with open(os.path.join(fsroot, m.group(1).lstrip("/")),
+                                  "r", encoding="utf-8") as fh:
+                            counted = {}
+                            for line in fh:
+                                if line.strip():
+                                    k = line.split()[0]
+                                    counted[k] = counted.get(k, 0) + 1
+                        winner = max(counted.items(), key=lambda kv: kv[1])
+                        answers = [c["answer"] for c in dump["stages"]["top-talker"]["checks"]]
+                        check(winner[0] == answers[0],
+                              "seed %d: top-talker answer %s but log winner is %s"
+                              % (seed, answers[0], winner[0]))
+                        check(str(winner[1]) == answers[1],
+                              "seed %d: top-talker count %s but log says %d"
+                              % (seed, answers[1], winner[1]))
+                        ordered = sorted(counted.values(), reverse=True)
+                        check(len(ordered) > 1 and ordered[1] < ordered[0],
+                              "seed %d: top-talker has no clear winner" % seed)
+
+                # config-drift: the baseline token lives only in the backup.
+                if stage["id"] == "config-drift":
+                    m = drift_re.search(instr)
+                    check(m is not None, "seed %d: config-drift paths not in instruction" % seed)
+                    if m:
+                        base = os.path.join(fsroot, m.group(1).lstrip("/"))
+                        with open(os.path.join(base, "app.conf"), "r", encoding="utf-8") as fh:
+                            live = fh.read()
+                        with open(os.path.join(base, "app.conf.bak"), "r", encoding="utf-8") as fh:
+                            backup = fh.read()
+                        token = dump["stages"]["config-drift"]["checks"][1]["answer"]
+                        check(token in backup, "seed %d: config-drift token missing from backup" % seed)
+                        check(token not in live, "seed %d: config-drift token also in app.conf" % seed)
+
+            for dirpath, _dirnames, filenames in os.walk(fsroot):
+                check("answers.json" not in filenames,
+                      "seed %d: answers.json leaked into %s" % (seed, dirpath))
+
+            if verbose:
+                print("selftest seed %d: %d stages checked" % (seed, len(stages)))
+
+    if failures:
+        print("SELFTEST FAILED: %d assertion(s)" % len(failures), file=sys.stderr)
+        return 1
+    print("SELFTEST OK: %d seed(s), %d stages each" % (len(seeds), len(ALL_IDS)))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Generate randomized SRE terminal challenges.")
-    ap.add_argument("--seed", type=int, required=True, help="deterministic integer seed")
-    ap.add_argument("--set", dest="set_size", type=int, required=True,
+    ap.add_argument("--seed", type=int, default=None, help="deterministic integer seed")
+    ap.add_argument("--set", dest="set_size", type=int, default=None,
                     help="number of stages (1..%d)" % len(ALL_IDS))
-    ap.add_argument("--out", required=True, help="output directory")
+    ap.add_argument("--out", default=None, help="output directory")
     ap.add_argument("--dump-answers", dest="dump", default=None,
                     help="write test-only plaintext answers JSON here")
+    ap.add_argument("--self-test", dest="self_test", metavar="SEEDS", default=None,
+                    help="generate a full set for each comma-separated seed and "
+                         "cross-check every answer against the artefacts on disk")
     args = ap.parse_args(argv)
 
+    if args.self_test is not None:
+        try:
+            seeds = [int(s) for s in args.self_test.replace(" ", ",").split(",") if s]
+        except ValueError:
+            ap.error("--self-test expects comma-separated integers")
+        if not seeds:
+            ap.error("--self-test expects at least one seed")
+        return self_test(seeds)
+
+    if args.seed is None or args.set_size is None or args.out is None:
+        ap.error("--seed, --set and --out are required (unless --self-test is used)")
     if not 1 <= args.set_size <= len(ALL_IDS):
         ap.error("--set must be between 1 and %d" % len(ALL_IDS))
 

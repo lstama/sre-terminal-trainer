@@ -258,12 +258,22 @@ case $RECORD in
 esac
 expect_not_contains "finish never echoes the flag" "$FINAL_FLAG"
 
+expect_rc "second finish is refused" 1 run finish "$FINAL_FLAG"
+expect_contains "second finish explains why" "already recorded"
+if [ -f "$STATE/finished" ]; then ok "finished marker written"; else bad "finished marker missing"; fi
+if [ "$(wc -l <"$STATE/records.jsonl" | tr -d ' ')" = "1" ]; then
+    ok "second finish did not append a duplicate record"
+else
+    bad "duplicate record appended by a repeated finish"
+fi
+
 # ---------------------------------------------------------------- reset
 printf '\n== reset ==\n'
 expect_rc "reset after completion" 0 run reset
 expect_contains "reset confirmation" "Back at stage 1"
 if [ "$(tr -d '[:space:]' <"$STATE/progress")" = "1" ]; then ok "progress back to 1"; else bad "progress not reset"; fi
 if [ ! -e "$STATE/clock" ]; then ok "clock cleared"; else bad "clock survived reset"; fi
+if [ ! -e "$STATE/finished" ]; then ok "finished marker cleared"; else bad "finished marker survived reset"; fi
 if [ -e "$STATE/records.jsonl" ] && [ "$(wc -l <"$STATE/records.jsonl" | tr -d ' ')" = "1" ]; then
     ok "records.jsonl preserved across reset"
 else

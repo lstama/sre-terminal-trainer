@@ -1087,6 +1087,14 @@ static int cmd_finish(const char *flag)
         return 1;
     }
 
+    if (path_state(p, sizeof(p), "finished") != 0)
+        return fail("path too long");
+    if (file_exists(p)) {
+        printf("NOT OK: this run is already recorded in state/records.jsonl.\n");
+        printf("Run: verify reset   to start a fresh attempt.\n");
+        return 1;
+    }
+
     el = elapsed_seconds();
     if (el < 0)
         el = 0;
@@ -1122,6 +1130,19 @@ static int cmd_finish(const char *flag)
         return fail("path too long");
     if (append_file(p, json, (size_t)len) != 0)
         return fail("cannot append to state/records.jsonl: %s", strerror(errno));
+
+    /* Marker so a second `verify finish` cannot append a duplicate record. */
+    {
+        char mark[64];
+        int n;
+        if (path_state(p, sizeof(p), "finished") != 0)
+            return fail("path too long");
+        n = snprintf(mark, sizeof(mark), "epoch=%lld\n", epoch);
+        if (n < 0 || (size_t)n >= sizeof(mark))
+            return fail("cannot format finished marker");
+        if (write_file(p, mark, (size_t)n) != 0)
+            return fail("cannot write state/finished: %s", strerror(errno));
+    }
     return 0;
 }
 
@@ -1249,6 +1270,8 @@ static int cmd_reset(void)
     if (path_state(p, sizeof(p), "clock") == 0 && unlink(p) == 0)
         removed++;
     if (path_state(p, sizeof(p), "progress") == 0 && unlink(p) == 0)
+        removed++;
+    if (path_state(p, sizeof(p), "finished") == 0 && unlink(p) == 0)
         removed++;
     for (i = 1; i <= g_nstage; i++) {
         if (path_state_stage(p, sizeof(p), i, "frag") == 0 && unlink(p) == 0)

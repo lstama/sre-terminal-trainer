@@ -4,8 +4,10 @@ A Docker-based SRE terminal practice harness: one build produces a randomized se
 hands-on drills, an SSH session to solve them, and a setuid helper that verifies answers
 and records your time. Nothing is hosted; everything runs locally.
 
-Reference detail for this phase: `.agent/reports/T01-scaffold.md` (scaffold, build,
-container and docs) plus the T02/T03 reports.
+Reference detail for this phase: `.agent/reports/` — `T01-scaffold.md` (scaffold, build,
+container and docs), `T02-generator.md` (challenge templates and file-check semantics),
+`T03-verifier.md` (setuid verifier), `T04-review.md` (read-only acceptance review) and
+`T05-fix-verify.md` (defect fixes + dynamic end-to-end verification).
 
 ## Goal
 
@@ -13,8 +15,10 @@ container and docs) plus the T02/T03 reports.
 records. Re-running with the same seed replays the same challenge set; `make new` gives a
 new one.
 
-Non-goals: no web UI, no scoring service, no network access from inside the container, no
-`sudo` for the trainee, no answer material in the repo or the image.
+Non-goals: no web UI, no scoring service, no `sudo` for the trainee, no answer material in
+the repo or the image. The container is not isolated from the network at the Docker level
+(the published sshd port is bound to loopback, and the image simply ships no tooling that
+needs egress); the drills are all local files.
 
 ## Architecture
 
@@ -37,21 +41,25 @@ Non-goals: no web UI, no scoring service, no network access from inside the cont
    paths, modes preserved), installs the verifier as `/usr/local/bin/verify` (4755
    root:root), and the root-only corpus at `/var/lib/sre-trainer/` (0700 dirs / 0600
    files). `/home/trainee` is owned by uid/gid 1000 so the trainee can edit its files.
-4. `docker run` publishes `PORT:22` and passes `SSH_USER`/`SSH_PASSWORD`; the entrypoint
-   creates the account (uid 1000, home `/home/trainee`, `/bin/bash`) and starts sshd.
+4. `docker run` publishes `127.0.0.1:PORT` → `22` (loopback only) and passes
+   `SSH_USER`/`SSH_PASSWORD`; the entrypoint creates the account (uid 1000, home
+   `/home/trainee`, `/bin/bash`) and starts sshd.
 5. `verify` reads the manifest/stages as root, writes progress and a JSONL record under
    `/var/lib/sre-trainer/state/`. `make down` copies `state/records.jsonl` to the host.
 
 ### Interfaces (do not change casually)
 
-- Generator CLI: `--seed INT --set N --out DIR --dump-answers FILE`.
+- Generator CLI: `--seed INT --set N --out DIR --dump-answers FILE`; `--self-test SEEDS`
+  regenerates a full set per seed and re-derives every answer from the artefacts on disk.
 - Generator output: `fs/` mirrors container-absolute paths; `manifest` is line based
   (`SEED n`, `STAGES n`, `STAGE <id>` repeated); `stages/NN/{instruction,hint,checks.tsv,
   flag.sha256}`; `final.sha256`.
 - Verifier CLI: `next`, `check <id> <answer>`, `stage`, `unlock <flag>`,
   `finish <final-flag>`, `hint [n]`, `status`, `reset`, `--help`.
 - State: `/var/lib/sre-trainer/state/{progress,clock,stage_NN.frag,stage_NN.done,
-  records.jsonl}`; records are `{"epoch","elapsed_seconds","seed","stages"}`.
+  finished,records.jsonl}`; records are `{"epoch","elapsed_seconds","seed","stages"}`.
+  `finished` marks a recorded run so a second `verify finish` cannot append a duplicate;
+  `verify reset` clears it along with the progress files.
 - Host creds: `.instance/creds` with `SSH_USER=`/`SSH_PASSWORD=` lines, mode 0600.
 
 ## Decisions
@@ -74,10 +82,11 @@ Non-goals: no web UI, no scoring service, no network access from inside the cont
 
 | Task | Scope | State |
 |---|---|---|
-| T01 | Repo skeleton, Dockerfile, entrypoint/sshd config, Makefile, docs | done (this phase) |
-| T02 | `generator/generate.py` — challenge templates and artifact layout | code landed, integration to confirm |
-| T03 | `src/verify.c` (+ helpers) — setuid verifier and state machine | code landed, integration to confirm |
-| T04 | End-to-end acceptance: `make test`, walkthrough doc | pending |
+| T01 | Repo skeleton, Dockerfile, entrypoint/sshd config, Makefile, docs | done |
+| T02 | `generator/generate.py` — challenge templates, artifact layout, `--self-test` | done |
+| T03 | `src/verify.c` (+ helpers) — setuid verifier and state machine | done |
+| T04 | End-to-end acceptance review (read-only) | done — findings in T04 report |
+| T05 | Fix review findings, dynamic end-to-end verification, walkthrough | done |
 
 ## Open questions
 

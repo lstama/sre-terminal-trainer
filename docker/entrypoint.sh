@@ -5,12 +5,20 @@ set -eu
 
 name="${SSH_USER:-trainee}"
 : "${SSH_PASSWORD:?SSH_PASSWORD must be set (the container has no default password)}"
+home=/home/trainee
 
-grep -q "^${name}:" /etc/group || groupadd -g 1000 "$name"
-id -u "$name" >/dev/null 2>&1 || useradd -u 1000 -g "$(grep "^${name}:" /etc/group | cut -d: -f3)" -d /home/trainee -s /bin/bash -M "$name"
+# Literal (not regex) membership test: SSH_USER is only constrained by the host
+# operator, so never interpolate it into a grep pattern.
+if ! awk -F: -v n="$name" '$1 == n { found = 1 } END { exit found ? 0 : 1 }' /etc/group; then
+  groupadd -g 1000 "$name"
+fi
+if ! id -u "$name" >/dev/null 2>&1; then
+  gid=$(awk -F: -v n="$name" '$1 == n { print $3 }' /etc/group)
+  useradd -u 1000 -g "$gid" -d "$home" -s /bin/bash -M "$name"
+fi
 printf '%s:%s\n' "$name" "$SSH_PASSWORD" | chpasswd
 
-chown -R 1000:1000 /home/trainee
+chown -R 1000:1000 "$home"
 mkdir -p /run/sshd /var/lib/sre-trainer/state
 chown -R 0:0 /var/lib/sre-trainer
 find /var/lib/sre-trainer -type d -exec chmod 0700 {} +
