@@ -86,12 +86,17 @@ Start a completely new challenge set with `make new` (down + fresh seed).
 | `make new` | `down`, then `up` with a fresh random seed. |
 | `make best` | Sort the saved records by elapsed time. |
 | `make test` | One up/down cycle, then assert the working tree is still clean. |
+| `make demo` | Re-record the demo (`docs/demo/sample-run.mp4` and `.gif`) with VHS. |
+| `make demo-mp4`, `make demo-gif` | Re-record only one of the two demo files. |
 | `make clean` | Remove the container, the image, `.instance/` and `state/`. |
 
 Variables: `ENGINE` (`podman` or `docker`, auto-detected as described above), `IMAGE`,
-`CONTAINER`, `PORT`, `SET` (stages per run, default 8), `SEED`, `SSH_USER`. A given `SEED`
-always produces the same challenge set, so `make up SEED=1234` replays a run; `make new`
-picks a new seed for you.
+`CONTAINER`, `PORT`, `SET` (stages per run, default 8), `SEED`, `SSH_USER`, `INSTANCE`
+(where credentials go, default `.instance`) and `STATE` (where records go, default
+`state/`). A given `SEED` always produces the same challenge set, so `make up SEED=1234`
+replays a run; `make new` picks a new seed for you. `INSTANCE`/`STATE` are the escape
+hatch used by the demo recorder, which keeps its own credentials and records in a
+throwaway `.demo-instance/` and `.demo-state/` instead of overwriting yours.
 
 ## Local state
 
@@ -100,6 +105,7 @@ picks a new seed for you.
 | `.instance/creds` | `SSH_USER`, `SSH_PASSWORD` (mode 0600) | no |
 | `.instance/seed` | Seed of the last build | no |
 | `state/records.jsonl` | Completion records copied out by `make down` | no |
+| `.demo-instance/`, `.demo-state/` | Same, for the throwaway instance `make demo` records in | no |
 
 Only sources, config and docs are tracked; see `.gitignore` and `.dockerignore`.
 
@@ -133,6 +139,41 @@ and honours `.dockerignore` identically, so both engines produce the same image.
 A guided, spoiler-free walkthrough of a full run (from `make up` to the final flag) lives
 at [docs/walkthrough.md](docs/walkthrough.md): the session mechanics, plus what each drill
 teaches and how to approach it without giving any answers away.
+
+## Demo
+
+![A full sample attempt: make up, make ssh, verify next, a grep on the deploy log, three verified answers, the stage flag and the next brief](docs/demo/sample-run.gif)
+
+That recording is a real session against a real container — nothing is typed by hand, staged
+or faked. It shows one stage end to end: `make up`, `make ssh` with the generated password,
+`verify next`, the `grep` work the brief actually asks for, the three `verify check`
+submissions, `verify stage`, `verify unlock <flag>` (which prints the next stage's brief) and
+`make down`. A higher-quality copy is
+[docs/demo/sample-run.mp4](docs/demo/sample-run.mp4).
+
+The recordings are committed, so **VHS is only needed to regenerate them**:
+
+```sh
+make demo       # rewrite docs/demo/sample-run.{mp4,gif}
+make demo-mp4   # only the MP4
+make demo-gif   # only the GIF
+```
+
+Regenerating needs [VHS](https://github.com/charmbracelet/vhs) and `ffmpeg` (which VHS itself
+uses), plus `gifsicle` if it is installed, to shrink the GIF. `demo/render.sh` drives it:
+
+- it regenerates the answer key for a fixed seed on the host and asserts that stage 1 is
+  `deploy-error`, a quick grep drill (`SEED=…` selects a different one);
+- it warms the image cache first, then records a real `make up`;
+- it runs on a throwaway instance — `.demo-instance/`, `.demo-state/`, container
+  `sre-trainer-demo`, port 2299 — so your own credentials, records and container are never
+  touched, and it removes that instance whether the recording succeeds or fails;
+- it fills `demo/sample.tape` in with the generated log path, check ids, answers and stage
+  flag, and runs VHS from a scratch directory.
+
+`demo/style.tape` holds every presentation setting (theme, font size, window bar, margin,
+framerate), so the look can be swapped without touching the run; `demo/sample.tape` is the
+sequence. The password in the video belongs to the demo container and is thrown away with it.
 
 ## Troubleshooting
 

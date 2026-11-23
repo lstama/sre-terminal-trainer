@@ -16,3 +16,5 @@ tests/out/
 .vscode/
 .DS_Store
 *.swp
+.demo-instance/
+.demo-state/
