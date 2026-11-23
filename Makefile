@@ -25,16 +25,16 @@ SET       ?= 8
 SEED      ?=
 SSH_USER  ?= trainee
 
-INSTANCE := .instance
+INSTANCE ?= .instance
 CREDS    := $(INSTANCE)/creds
 SEEDFILE := $(INSTANCE)/seed
-STATE    := state
+STATE    ?= state
 
 RANDOM_PASSWORD = python3 -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(16)))'
 RANDOM_SEED     = python3 -c 'import secrets; print(secrets.randbelow(899999)+100000)'
 PORT_FREE       = python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); sys.exit(0 if s.connect_ex(("127.0.0.1", $(PORT))) else 1)'
 
-.PHONY: help up down ssh new status best test clean
+.PHONY: help up down ssh new status best test clean demo demo-mp4 demo-gif
 
 help:
 	@printf '%s\n' \
@@ -48,10 +48,13 @@ help:
 	  '  make new                down + up with a fresh random seed' \
 	  '  make best               local completion records, fastest first' \
 	  '  make test               up/down cycle, then assert the tree stays clean' \
+	  '  make demo               re-record docs/demo/sample-run.mp4 and .gif (needs vhs)' \
+	  '  make demo-mp4           re-record only the MP4 deliverable' \
+	  '  make demo-gif           re-record only the GIF deliverable' \
 	  '  make clean              remove container, image, .instance/ and state/' \
 	  '' \
 	  'Variables: ENGINE (podman|docker, auto-detected), IMAGE, CONTAINER,' \
-	  '           PORT, SET, SEED, SSH_USER' \
+	  '           PORT, SET, SEED, SSH_USER, INSTANCE (.instance), STATE (state)' \
 	  '' \
 	  'State lives in .instance/ (0600 credentials) and state/ (records).' \
 	  'Both are gitignored; only source, config and docs are committed.'
@@ -199,3 +202,15 @@ clean:
 	$(ENGINE) rmi -f '$(IMAGE)' >/dev/null 2>&1 || true
 	rm -rf $(INSTANCE) $(STATE)
 	printf '==> removed container, image, %s/ and %s/\n' '$(INSTANCE)' '$(STATE)'
+
+# Demo recordings.  These drive the real harness through VHS; the topology of
+# the run lives in demo/sample.tape and the look in demo/style.tape.  The
+# recordings are committed, so VHS is only needed to regenerate them.
+demo:
+	@sh demo/render.sh both
+
+demo-mp4:
+	@sh demo/render.sh mp4
+
+demo-gif:
+	@sh demo/render.sh gif
