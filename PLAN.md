@@ -1,13 +1,14 @@
 # PLAN — sre-terminal-trainer
 
-A Docker-based SRE terminal practice harness: one build produces a randomized set of
-hands-on drills, an SSH session to solve them, and a setuid helper that verifies answers
+A Docker/Podman-based SRE terminal practice harness: one build produces a randomized set
+of hands-on drills, an SSH session to solve them, and a setuid helper that verifies answers
 and records your time. Nothing is hosted; everything runs locally.
 
 Reference detail for this phase: `.agent/reports/` — `T01-scaffold.md` (scaffold, build,
 container and docs), `T02-generator.md` (challenge templates and file-check semantics),
-`T03-verifier.md` (setuid verifier), `T04-review.md` (read-only acceptance review) and
-`T05-fix-verify.md` (defect fixes + dynamic end-to-end verification).
+`T03-verifier.md` (setuid verifier), `T04-review.md` (read-only acceptance review),
+`T05-fix-verify.md` (defect fixes + dynamic end-to-end verification) and `T07-podman.md`
+(engine abstraction, Podman install and both-engine verification).
 
 ## Goal
 
@@ -16,20 +17,20 @@ records. Re-running with the same seed replays the same challenge set; `make new
 new one.
 
 Non-goals: no web UI, no scoring service, no `sudo` for the trainee, no answer material in
-the repo or the image. The container is not isolated from the network at the Docker level
-(the published sshd port is bound to loopback, and the image simply ships no tooling that
-needs egress); the drills are all local files.
+the repo or the image. The container is not network-isolated at the engine level (the
+published sshd port is bound to loopback, and the image simply ships no tooling that needs
+egress); the drills are all local files.
 
 ## Architecture
 
 | Piece | Where | When it runs |
 |---|---|---|
-| Challenge generator (Python) | `generator/generate.py` | Docker **builder** stage only |
+| Challenge generator (Python) | `generator/generate.py` | container **builder** stage only |
 | Verifier (C, static, setuid root) | `src/verify.c` (+ `sha256.c`, `util.c`) | compiled in builder, run by the trainee |
 | Container image | `Dockerfile` (multi-stage, pinned `alpine:3.24.4`) | built by `make up` |
 | Runtime entrypoint | `docker/entrypoint.sh` | container start: user from `SSH_USER`/`SSH_PASSWORD`, ownership, exec sshd |
 | sshd config | `docker/sshd_config` | password auth, root login off, `UsePAM no` |
-| Host orchestration | `Makefile` | `up`, `down`, `ssh`, `new`, `status`, `best`, `test`, `clean` |
+| Host orchestration | `Makefile` | `up`, `down`, `ssh`, `new`, `status`, `best`, `test`, `clean` via `$(ENGINE)` |
 
 ### Data flow
 
@@ -41,8 +42,8 @@ needs egress); the drills are all local files.
    paths, modes preserved), installs the verifier as `/usr/local/bin/verify` (4755
    root:root), and the root-only corpus at `/var/lib/sre-trainer/` (0700 dirs / 0600
    files). `/home/trainee` is owned by uid/gid 1000 so the trainee can edit its files.
-4. `docker run` publishes `127.0.0.1:PORT` → `22` (loopback only) and passes
-   `SSH_USER`/`SSH_PASSWORD`; the entrypoint creates the account (uid 1000, home
+4. `$(ENGINE) run` (docker or podman) publishes `127.0.0.1:PORT` → `22` (loopback only)
+   and passes `SSH_USER`/`SSH_PASSWORD`; the entrypoint creates the account (uid 1000, home
    `/home/trainee`, `/bin/bash`) and starts sshd.
 5. `verify` reads the manifest/stages as root, writes progress and a JSONL record under
    `/var/lib/sre-trainer/state/`. `make down` copies `state/records.jsonl` to the host.
@@ -76,6 +77,12 @@ needs egress); the drills are all local files.
 - **uid/gid 1000** for the trainee, home `/home/trainee`, shell `/bin/bash`, no `sudo`.
 - **Records live in `state/records.jsonl`** (the verifier's documented layout) and are
   copied to the host as `state/records.jsonl`; both are gitignored.
+- **One engine variable, no engine-specific branches**: every target invokes `$(ENGINE)`
+  (podman when on `PATH`, else docker, overridable with `ENGINE=…`). Docker and Podman
+  accept the same `build`, `run -d -p`, `exec`, `ps --filter/--format`, `logs`, `inspect`,
+  `cp`, `image inspect`, `rm -f` and `rmi -f` invocations used here, so no conditional code
+  was needed; the loopback publish and the 4755 verifier behave identically (rootless
+  Podman maps container-root into the user namespace, where setuid still works).
 - **Host credentials are generated per instance** by `up` (mode 0600, never committed).
 
 ## Task split
@@ -87,6 +94,8 @@ needs egress); the drills are all local files.
 | T03 | `src/verify.c` (+ helpers) — setuid verifier and state machine | done |
 | T04 | End-to-end acceptance review (read-only) | done — findings in T04 report |
 | T05 | Fix review findings, dynamic end-to-end verification, walkthrough | done |
+| T06 | Read-only static recheck of the fixed harness | done |
+| T07 | Docker/Podman engine abstraction, Podman install, both-engine verification | done |
 
 ## Open questions
 

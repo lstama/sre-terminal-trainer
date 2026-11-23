@@ -5,12 +5,18 @@
 #   .instance/seed    seed of the last build
 #   state/            completion records copied out of the container by `down`
 #
-# Requires: docker, GNU make, python3 (host side only: random creds, `best`).
+# Requires: docker or podman, GNU make, python3 (host side only: random creds,
+# `best`). The container engine is picked at run time: podman when it is on
+# PATH, docker otherwise; override with ENGINE=docker / ENGINE=podman.
 
 SHELL := /bin/sh
 .SHELLFLAGS := -eu -c
 .ONESHELL:
 .DEFAULT_GOAL := help
+
+# Every target talks to $(ENGINE); the flags used are shared by docker and
+# podman (build/run/exec/ps/logs/inspect/cp/image/rm/rmi).
+ENGINE    ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 
 IMAGE     ?= sre-terminal-trainer:local
 CONTAINER ?= sre-trainer
@@ -44,7 +50,8 @@ help:
 	  '  make test               up/down cycle, then assert the tree stays clean' \
 	  '  make clean              remove container, image, .instance/ and state/' \
 	  '' \
-	  'Variables: IMAGE, CONTAINER, PORT, SET, SEED, SSH_USER' \
+	  'Variables: ENGINE (podman|docker, auto-detected), IMAGE, CONTAINER,' \
+	  '           PORT, SET, SEED, SSH_USER' \
 	  '' \
 	  'State lives in .instance/ (0600 credentials) and state/ (records).' \
 	  'Both are gitignored; only source, config and docs are committed.'
@@ -75,15 +82,15 @@ up:
 	  echo "error: port $(PORT) is already in use; retry with PORT=<free port>" >&2
 	  exit 1
 	fi
-	printf '==> building %s (seed=%s set=%s)\n' '$(IMAGE)' "$$seed" '$(SET)'
-	docker build --build-arg SEED="$$seed" --build-arg SET='$(SET)' -t '$(IMAGE)' .
-	docker rm -f '$(CONTAINER)' >/dev/null 2>&1 || true
+	printf '==> building %s (seed=%s set=%s, engine=%s)\n' '$(IMAGE)' "$$seed" '$(SET)' '$(ENGINE)'
+	$(ENGINE) build --build-arg SEED="$$seed" --build-arg SET='$(SET)' -t '$(IMAGE)' .
+	$(ENGINE) rm -f '$(CONTAINER)' >/dev/null 2>&1 || true
 	printf '==> starting %s (port %s)\n' '$(CONTAINER)' '$(PORT)'
-	docker run -d --name '$(CONTAINER)' -p '127.0.0.1:$(PORT)':22 \
+	$(ENGINE) run -d --name '$(CONTAINER)' -p '127.0.0.1:$(PORT)':22 \
 	  -e SSH_USER="$$user" -e SSH_PASSWORD="$$password" '$(IMAGE)' >/dev/null
-	if ! docker ps --filter 'name=^$(CONTAINER)$$' --format '{{.Names}}' | grep -q .; then
+	if ! $(ENGINE) ps --filter 'name=^$(CONTAINER)$$' --format '{{.Names}}' | grep -q .; then
 	  echo 'error: the container exited immediately; last log lines:' >&2
-	  docker logs '$(CONTAINER)' 2>&1 | tail -n 20 >&2 || true
+	  $(ENGINE) logs '$(CONTAINER)' 2>&1 | tail -n 20 >&2 || true
 	  exit 1
 	fi
 	i=0
@@ -91,9 +98,9 @@ up:
 	  if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(1); sys.exit(0 if s.connect_ex(('127.0.0.1',$(PORT)))==0 else 1)"; then break; fi
 	  i=$$((i+1)); sleep 0.5
 	done
-	if ! stages=$$(docker exec '$(CONTAINER)' sh -c 'grep "^STAGE " /var/lib/sre-trainer/manifest | cut -d" " -f2'); then
+	if ! stages=$$($(ENGINE) exec '$(CONTAINER)' sh -c 'grep "^STAGE " /var/lib/sre-trainer/manifest | cut -d" " -f2'); then
 	  echo 'error: could not read the stage list from the container' >&2
-	  docker logs '$(CONTAINER)' 2>&1 | tail -n 20 >&2 || true
+	  $(ENGINE) logs '$(CONTAINER)' 2>&1 | tail -n 20 >&2 || true
 	  exit 1
 	fi
 	if [ -z "$$stages" ]; then
@@ -109,13 +116,13 @@ up:
 
 down:
 	@mkdir -p $(STATE)
-	if docker inspect '$(CONTAINER)' >/dev/null 2>&1; then
-	  if docker cp '$(CONTAINER)':/var/lib/sre-trainer/state/records.jsonl $(STATE)/records.jsonl 2>/dev/null; then
+	if $(ENGINE) inspect '$(CONTAINER)' >/dev/null 2>&1; then
+	  if $(ENGINE) cp '$(CONTAINER)':/var/lib/sre-trainer/state/records.jsonl $(STATE)/records.jsonl 2>/dev/null; then
 	    printf '==> saved %s/records.jsonl\n' '$(STATE)'
 	  else
 	    printf '==> no completion records in the container to save\n'
 	  fi
-	  docker rm -f '$(CONTAINER)' >/dev/null
+	  $(ENGINE) rm -f '$(CONTAINER)' >/dev/null
 	  printf '==> removed container %s\n' '$(CONTAINER)'
 	else
 	  printf '==> no container named %s\n' '$(CONTAINER)'
@@ -136,7 +143,7 @@ new:
 	$(MAKE) --no-print-directory up SEED="$$seed"
 
 status:
-	@docker ps -a --filter 'name=^$(CONTAINER)$$' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' || true
+	@$(ENGINE) ps -a --filter 'name=^$(CONTAINER)$$' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' || true
 	printf '\n'
 	if [ -s $(CREDS) ]; then
 	  printf 'credentials : %s (mode %s)\n' '$(CREDS)' "$$(stat -c %a $(CREDS))"
@@ -146,9 +153,9 @@ status:
 	fi
 	if [ -s $(SEEDFILE) ]; then printf 'seed        : %s\n' "$$(cat $(SEEDFILE))"; fi
 	printf 'port        : %s\n' '$(PORT)'
-	if docker inspect '$(CONTAINER)' >/dev/null 2>&1; then
-	  printf 'image       : %s\n' "$$(docker inspect --format '{{.Config.Image}}' '$(CONTAINER)')"
-	  docker exec '$(CONTAINER)' sh -c 'sed -n "s/^STAGE /  stage     : /p" /var/lib/sre-trainer/manifest' || true
+	if $(ENGINE) inspect '$(CONTAINER)' >/dev/null 2>&1; then
+	  printf 'image       : %s\n' "$$($(ENGINE) inspect --format '{{.Config.Image}}' '$(CONTAINER)')"
+	  $(ENGINE) exec '$(CONTAINER)' sh -c 'sed -n "s/^STAGE /  stage     : /p" /var/lib/sre-trainer/manifest' || true
 	else
 	  printf 'container   : not created\n'
 	fi
@@ -173,11 +180,11 @@ test:
 	@printf '==> up/down cycle\n'
 	$(MAKE) --no-print-directory up
 	$(MAKE) --no-print-directory down
-	if docker inspect '$(CONTAINER)' >/dev/null 2>&1; then
+	if $(ENGINE) inspect '$(CONTAINER)' >/dev/null 2>&1; then
 	  echo 'FAIL: container still exists after make down' >&2
 	  exit 1
 	fi
-	if ! docker image inspect '$(IMAGE)' >/dev/null 2>&1; then
+	if ! $(ENGINE) image inspect '$(IMAGE)' >/dev/null 2>&1; then
 	  echo 'FAIL: image was not built' >&2
 	  exit 1
 	fi
@@ -188,7 +195,7 @@ test:
 	printf '==> OK: image builds, container runs, tree is clean\n'
 
 clean:
-	@docker rm -f '$(CONTAINER)' >/dev/null 2>&1 || true
-	docker rmi -f '$(IMAGE)' >/dev/null 2>&1 || true
+	@$(ENGINE) rm -f '$(CONTAINER)' >/dev/null 2>&1 || true
+	$(ENGINE) rmi -f '$(IMAGE)' >/dev/null 2>&1 || true
 	rm -rf $(INSTANCE) $(STATE)
 	printf '==> removed container, image, %s/ and %s/\n' '$(INSTANCE)' '$(STATE)'

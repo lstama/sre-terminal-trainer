@@ -6,6 +6,10 @@
 # compiles the verifier; the runtime image ships only the generated data,
 # the setuid verifier, sshd and a small terminal toolbox.
 #
+# Builds unchanged with `docker build` and `podman build` (buildah reads the
+# same file and honours .dockerignore; only standard instructions are used, so
+# the `syntax=` line above is a no-op under buildah).
+#
 # The Alpine patch level is pinned on purpose: a rebuild must not silently
 # change musl, OpenSSH or coreutils underneath the challenges.
 ARG ALPINE_VERSION=3.24.4
