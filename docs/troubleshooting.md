@@ -1,6 +1,6 @@
 # Day 2: the troubleshoot profile
 
-The trainer's second profile is a pool of eight diagnostic drills whose terminal
+The trainer's second profile is a pool of ten diagnostic drills whose terminal
 commands are answered from fixtures instead of a live machine. It exists to
 practise the read-then-repair loop — inspect the evidence, decide on one change,
 make it, prove it — without shipping a privileged container, a systemd host or a
@@ -13,11 +13,12 @@ profile, the interaction is identical; only the stages differ.
 
 - Profile flag: `PROFILE=troubleshoot`
 - Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`,
-  `nginx-config`, `dns-mismatch`, `selinux-avc`, `port-conflict`
+  `nginx-config`, `dns-mismatch`, `selinux-avc`, `port-conflict`, `oom-kill`,
+  `image-pull`
 - Image / container: `sre-terminal-trainer-troubleshoot:local` / `sre-trainer-troubleshoot`
   (separate from the default names, so both profiles can run side by side)
 
-## The eight templates
+## The ten templates
 
 Each stage's brief names the exact files and check ids. The checklists below are
 the commands the stage is built around; the facts they expose are randomized per
@@ -165,6 +166,39 @@ Two hash checks use the holder's process name and conflicting port. The file
 check changes only `bind_port` in `/etc/<svc>/<svc>.conf` to the proposed free
 port, preserving every other byte.
 
+### `oom-kill`
+
+A service has been killed after memory exhaustion. Correlate the kernel's OOM
+record with current memory figures and the process view before choosing a cap:
+
+| Command | What it is for |
+|---|---|
+| `journalctl -u <unit> -n 100 --no-pager` | Killed PID/process and the memory-policy incident's approved limit |
+| `journalctl -xe` | The same failure in the short boot-wide form |
+| `free -m` | Total, used and available memory in MiB |
+| `top` | The high-MEM process and its resident memory |
+
+Two hash checks use the killed process identity and the available-memory
+figure. The file check corrects only `memory_limit_mb` in
+`/etc/<svc>/<svc>.conf`; the brief explains both the replacement and missing-
+setting cases. The safe value comes from the journal evidence, not a guess.
+
+### `image-pull`
+
+A container exists but its configured image could not be pulled. Compare the
+process list, pull diagnostics and inspection metadata using either supported
+container tool:
+
+| Command | What it is for |
+|---|---|
+| `docker ps -a` / `podman ps -a` | The created container and attempted image |
+| `docker logs <name>` / `podman logs <name>` | Pull failure, request-id and available release image |
+| `docker inspect <name>` / `podman inspect <name>` | Configured image, inspection error and release-tag clue |
+
+Two hash checks use the available image reference and failure request-id. The
+file check replaces only `IMAGE` in `/home/trainee/containers/<name>.env`,
+preserving the rest of the deploy environment byte for byte.
+
 ## How the mocks work
 
 Orchestration detail, not something a trainee needs to act on.
@@ -182,9 +216,11 @@ Orchestration detail, not something a trainee needs to act on.
   builder copies them to `/var/lib/sremock/current/` (root-owned, directories
   0755, files 0644 so the trainee can read them). `sremock` copies the selected
   file's bytes to stdout unchanged — no prefix, no added newline, CRLF and a
-  missing final newline are preserved. When selected stages share `ss_tlnp.txt`
-  or `curl_v.txt`, the generator composes their socket rows or labelled curl
-  transcripts in a canonical order so every stage keeps its own evidence.
+  missing final newline are preserved. When selected stages share evidence,
+  the generator composes it in a canonical order: socket rows and container
+  tables are combined, inspection arrays retain every object, and labelled
+   journal, memory or log reports stay intact. Every selected stage therefore
+   keeps its own clues regardless of `PICK` order.
 - **Selection is a small explicit parser, not a shell.** `journalctl -u UNIT -n
   100 --no-pager` accepts those three flags in any order; `journalctl -xe` is
   its own form. `kubectl` distinguishes `get pods`, `get events`, `get
@@ -209,7 +245,7 @@ Orchestration detail, not something a trainee needs to act on.
 ## Running it
 
 ```sh
-make up PROFILE=troubleshoot                         # seeded selection of all eight
+make up PROFILE=troubleshoot                         # seeded selection of all ten
 # Or choose an exact, ordered subset:
 make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
@@ -218,9 +254,9 @@ make ssh
 - `PICK` names any non-empty subset and its exact order for this build
   (`--pick` in the generator). With `PICK` set, `SET` does not decide the count;
   the picked list does.
-- With no `PICK`, this profile defaults to `SET=8`, selecting all eight templates
-  in seeded order. `SET=1` through `7` selects that many from the pool; values
-  outside 1–8 are rejected before the build. The terminal profile keeps its
+- With no `PICK`, this profile defaults to `SET=10`, selecting all ten templates
+  in seeded order. `SET=1` through `9` selects that many from the pool; values
+  outside 1–10 are rejected before the build. The terminal profile keeps its
   default `SET=8`.
 - `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
   corpus; the generator layer is keyed on the build arguments, so an unchanged
@@ -302,7 +338,7 @@ A stage is solved when `verify stage` prints its flag — not when the service
 - **Throwaway container.** Your edits live inside the container. `make down`
   removes it, so unrecorded work is gone; the completion record is the only
   thing that persists.
-- **Fixed pool.** There are eight templates. Fixtures for commands the picked
+- **Fixed pool.** There are ten templates. Fixtures for commands the picked
   stages do not use are still shipped, but they print a neutral placeholder
   instead of scenario data.
 

@@ -851,6 +851,7 @@ NEUTRAL_FIXTURE = "no data for this scenario\n"
 TROUBLESHOOT_IDS = [
     "svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
     "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict",
+    "oom-kill", "image-pull",
 ]
 TROUBLESHOOT_TEMPLATES = {}
 
@@ -903,6 +904,43 @@ def merge_curl_fixtures(left, right):
             if block.strip():
                 blocks.add(block.strip("\n"))
     return "\n\n".join(sorted(blocks)) + "\n"
+
+
+def merge_reports(left, right):
+    """Compose two whole, labelled command reports in canonical order.
+
+    Journal, memory and container-log fixtures are shared by at most two current
+    templates.  Keeping each report intact avoids inventing a combined process
+    table or interleaving unrelated timestamps, while sorting the two reports
+    makes the bytes independent of PICK order.
+    """
+    reports = {left.rstrip("\n"), right.rstrip("\n")}
+    return "\n\n".join(sorted(reports)) + "\n"
+
+
+def merge_container_ps_fixtures(left, right):
+    """Keep one container-table header and every stage's process row."""
+    headers = []
+    rows = set()
+    for text in (left, right):
+        lines = [line for line in text.splitlines() if line.strip()]
+        if lines and lines[0].startswith("CONTAINER ID"):
+            if lines[0] not in headers:
+                headers.append(lines[0])
+            lines = lines[1:]
+        rows.update(lines)
+    return "\n".join(headers + sorted(rows)) + "\n"
+
+
+def merge_inspect_fixtures(left, right):
+    """Merge Docker/Podman inspection arrays without dropping either object."""
+    objects = {}
+    for text in (left, right):
+        for obj in json.loads(text):
+            key = json.dumps(obj, sort_keys=True, separators=(",", ":"))
+            objects[key] = obj
+    ordered = [objects[key] for key in sorted(objects)]
+    return json.dumps(ordered, separators=(",", ":")) + "\n"
 
 
 def put_fixture_merged(fixtures, name, content, tid, merge):
@@ -1033,15 +1071,18 @@ def t_svc_crashloop(rng, fs, fixtures, soft):
             )
         else:
             journal.append(sys_line(rng))
-    put_fixture(fixtures, "journalctl_unit.txt", "\n".join(journal) + "\n", "svc-crashloop")
-    put_fixture(fixtures, "journalctl_xe.txt", "\n".join([
+    put_fixture_merged(fixtures, "journalctl_unit.txt",
+                       "-- unit %s --\n%s" % (unit, "\n".join(journal) + "\n"),
+                       "svc-crashloop", merge_reports)
+    put_fixture_merged(fixtures, "journalctl_xe.txt", "\n".join([
         "-- Boot 6f2c1d4e9a844b3c8b1e7d0a5f3c9d21 --",
+        "-- unit %s --" % unit,
         "%s systemd[1]: %s: Main process exited, code=exited, status=1/FAILURE" % (ts(rng), unit),
         "%s %s[%d]: FATAL: error %s while binding port %d (address already in use)"
         % (ts(rng), agent, holder_pid + 1, err, held_port),
         "%s systemd[1]: %s: Failed with result 'exit-code'." % (ts(rng), unit),
         "Hint: journalctl -u %s -n 100 --no-pager shows the full unit history." % unit,
-    ]) + "\n", "svc-crashloop")
+    ]) + "\n", "svc-crashloop", merge_reports)
     put_fixture_merged(fixtures, "ss_tlnp.txt", "\n".join([
         "State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process",
         'LISTEN  0       128     0.0.0.0:%-11d 0.0.0.0:*          users:(("%s",pid=%d,fd=%d))'
@@ -1289,17 +1330,17 @@ def t_disk_full(rng, fs, fixtures, soft):
     free = total - used - cache
     avail = free + cache // 2
     shared = rng.randint(80, 400)
-    put_fixture(fixtures, "free_m.txt", "\n".join([
+    put_fixture_merged(fixtures, "free_m.txt", "# snapshot disk-full\n" + "\n".join([
         "               total        used        free      shared  buff/cache   available",
         "Mem:        %8d    %8d    %8d    %8d    %8d    %8d"
         % (total, used, free, shared, cache, avail),
         "Swap:       %8d    %8d    %8d" % (4096, 512, 3584),
-    ]) + "\n", "disk-full")
+    ]) + "\n", "disk-full", merge_reports)
 
     pid = rng.randint(1200, 32000)
     load = "%.2f, %.2f, %.2f" % (
         rng.uniform(0.1, 1.5), rng.uniform(0.1, 1.8), rng.uniform(0.1, 2.0))
-    put_fixture(fixtures, "top.txt", "\n".join([
+    put_fixture_merged(fixtures, "top.txt", "# snapshot disk-full\n" + "\n".join([
         "top - %02d:%02d:%02d up 12 days,  3:14,  1 user,  load average: %s"
         % (rng.randint(0, 23), rng.randint(0, 59), rng.randint(0, 59), load),
         "Tasks: 128 total,   1 running, 127 sleeping,   0 stopped,   0 zombie",
@@ -1311,7 +1352,7 @@ def t_disk_full(rng, fs, fixtures, soft):
         "    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND",
         "  %5d %-8s  20   0  812344  98760  12344 S   2.3   0.6   1:23.45 %s-agent"
         % (pid, svc, svc),
-    ]) + "\n", "disk-full")
+    ]) + "\n", "disk-full", merge_reports)
 
     # The service journal is a soft fixture: svc-crashloop also owns
     # journalctl_unit.txt, and a hard fixture must win in either build order.
@@ -1429,23 +1470,27 @@ def t_container_crash(rng, fs, fixtures, soft):
         "%s   %-36s  \"/usr/local/bin/entry…\"   %-15s  %-26s            %s"
         % (digest, image, created, status, name),
     ]) + "\n"
-    put_fixture(fixtures, "docker_ps_a.txt", docker_ps, "container-crash")
+    put_fixture_merged(fixtures, "docker_ps_a.txt", docker_ps,
+                       "container-crash", merge_container_ps_fixtures)
     podman_ps = "\n".join([
         "CONTAINER ID  IMAGE                                 COMMAND               "
         "CREATED         STATUS                      PORTS       NAMES",
         "%s  %-36s  /usr/local/bin/entry  %-14s  %-26s              %s"
         % (digest, image, created, status, name),
     ]) + "\n"
-    put_fixture(fixtures, "podman_ps_a.txt", podman_ps, "container-crash")
+    put_fixture_merged(fixtures, "podman_ps_a.txt", podman_ps,
+                       "container-crash", merge_container_ps_fixtures)
 
-    logs = "\n".join([
+    logs = "# container %s (container-crash)\n%s" % (name, "\n".join([
         "%s %s: starting %s %s (build %s)" % (ts(rng), name, name, tag, secret),
         "%s %s: FATAL: required environment variable %s is not set (config %s); "
         "refusing to start" % (ts(rng), name, missing_var, secret),
         "%s %s: exiting with status %d" % (ts(rng), name, exit_code),
-    ]) + "\n"
-    put_fixture(fixtures, "docker_logs.txt", logs, "container-crash")
-    put_fixture(fixtures, "podman_logs.txt", logs, "container-crash")
+    ]) + "\n")
+    put_fixture_merged(fixtures, "docker_logs.txt", logs,
+                       "container-crash", merge_reports)
+    put_fixture_merged(fixtures, "podman_logs.txt", logs,
+                       "container-crash", merge_reports)
 
     inspect_docker = (
         '[{"Id":"%s","Name":"/%s","Config":{"Image":"%s",'
@@ -1454,14 +1499,16 @@ def t_container_crash(rng, fs, fixtures, soft):
         '"Labels":{"config-id":"%s"}}]'
         % (digest, name, image, exit_code, secret)
     )
-    put_fixture(fixtures, "docker_inspect.txt", inspect_docker + "\n", "container-crash")
+    put_fixture_merged(fixtures, "docker_inspect.txt", inspect_docker + "\n",
+                       "container-crash", merge_inspect_fixtures)
     inspect_podman = (
         '[{"Id":"%s","Name":"%s","Image":"%s","Config":{"Env":["LOG_LEVEL=info",'
         '"PORT=8080"]},"State":{"Status":"exited","ExitCode":%d,"OOMKilled":false,'
         '"Error":""},"Labels":{"config-id":"%s"}}]'
         % (digest, name, image, exit_code, secret)
     )
-    put_fixture(fixtures, "podman_inspect.txt", inspect_podman + "\n", "container-crash")
+    put_fixture_merged(fixtures, "podman_inspect.txt", inspect_podman + "\n",
+                       "container-crash", merge_inspect_fixtures)
 
     # Load-bearing invariants: the break is real and each clue is discoverable.
     if missing_var in env_broken or secret in env_broken:
@@ -1979,6 +2026,297 @@ def t_port_conflict(rng, fs, fixtures, soft):
     return instr, hints, checks
 
 
+@troubleshoot_template("oom-kill")
+def t_oom_kill(rng, fs, fixtures, soft):
+    """Memory-exhaustion triage: correlate an OOM kill with a safe cgroup cap."""
+    svc = tok(rng, "memsvc", 6)
+    unit = svc + ".service"
+    cfg = "/etc/%s/%s.conf" % (svc, svc)
+    process = tok(rng, "worker", 8)
+    incident = tok(rng, "oom", 8)
+    killed_pid = rng.randint(1800, 60000)
+    supervisor_pid = rng.randint(700, 1799)
+    total = rng.choice([8192, 16384])
+    free = rng.randint(32, 128)
+    cache = rng.randint(128, 384)
+    used = total - free - cache
+    available = free + cache // 2
+    high_rss = used - rng.randint(96, 320)
+    safe_limit = rng.randint(256, 768)
+    unsafe_limit = rng.choice([4096, 8192, 16384])
+    missing_limit = rng.choice([False, True])
+
+    broken_lines = [
+        "# %s service configuration (managed by ops)" % svc,
+        "service_name = %s" % svc,
+    ]
+    if not missing_limit:
+        broken_lines.append("memory_limit_mb = %d" % unsafe_limit)
+    broken_lines.extend([
+        "log_level = warn",
+        "restart_delay_seconds = 5",
+    ])
+    fixed_lines = list(broken_lines)
+    limit_line = "memory_limit_mb = %d" % safe_limit
+    if missing_limit:
+        fixed_lines.insert(2, limit_line)
+    else:
+        fixed_lines[2] = limit_line
+    broken = "\n".join(broken_lines) + "\n"
+    fixed = "\n".join(fixed_lines) + "\n"
+    wfile(fs, cfg, broken, mode=0o666)
+
+    journal = "\n".join([
+        "-- unit %s --" % unit,
+        "%s kernel: Out of memory: Killed process %d (%s) total-vm:%d kB, "
+        "anon-rss:%d kB, file-rss:%d kB, shmem-rss:0 kB, UID:1000"
+        % (ts(rng), killed_pid, process, high_rss * 1024 + 65536,
+           high_rss * 1024, rng.randint(0, 12000)),
+        "%s kernel: oom_reaper: reaped process %d (%s), now anon-rss:0kB"
+        % (ts(rng), killed_pid, process),
+        "%s memory-policy[%d]: incident %s approved safe memory_limit_mb=%d "
+        "for %s after workload review" % (ts(rng), supervisor_pid, incident,
+                                          safe_limit, unit),
+        "%s systemd[1]: %s: Main process exited, code=killed, status=9/KILL"
+        % (ts(rng), unit),
+        "%s systemd[1]: %s: Failed with result 'signal'." % (ts(rng), unit),
+    ]) + "\n"
+    put_fixture_merged(fixtures, "journalctl_unit.txt", journal,
+                       "oom-kill", merge_reports)
+    put_fixture_merged(fixtures, "journalctl_xe.txt", journal,
+                       "oom-kill", merge_reports)
+
+    put_fixture_merged(fixtures, "free_m.txt", "# snapshot oom-kill\n" + "\n".join([
+        "               total        used        free      shared  buff/cache   available",
+        "Mem:        %8d    %8d    %8d    %8d    %8d    %8d"
+        % (total, used, free, rng.randint(16, 96), cache, available),
+        "Swap:       %8d    %8d    %8d" % (2048, 0, 2048),
+    ]) + "\n", "oom-kill", merge_reports)
+
+    mem_percent = 100.0 * high_rss / total
+    put_fixture_merged(fixtures, "top.txt", "# snapshot oom-kill\n" + "\n".join([
+        "top - %02d:%02d:%02d up 3 days,  7:12,  1 user,  load average: 1.84, 1.62, 1.41"
+        % (rng.randint(0, 23), rng.randint(0, 59), rng.randint(0, 59)),
+        "Tasks: 121 total,   2 running, 119 sleeping,   0 stopped,   0 zombie",
+        "%Cpu(s): 12.4 us,  3.8 sy,  0.0 ni, 81.7 id,  1.2 wa,  0.0 hi,  0.9 si,  0.0 st",
+        "MiB Mem :  %8.1f total, %8.1f free, %8.1f used, %8.1f buff/cache"
+        % (total, free, used, cache),
+        "MiB Swap:   2048.0 total,  2048.0 free,     0.0 used.  %8.1f avail Mem" % available,
+        "",
+        "    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND",
+        "  %5d trainee   20   0 %7d %6d %5d R  88.2 %5.1f   9:41.23 %s"
+        % (killed_pid, high_rss * 1024 + 262144, high_rss, cache // 2,
+           mem_percent, process),
+        "    411 root      20   0   12000   4200   1800 S   0.3   0.1   0:03.11 sshd",
+    ]) + "\n", "oom-kill", merge_reports)
+
+    if safe_limit >= unsafe_limit or fixed == broken:
+        raise AssertionError("oom-kill: safe/broken memory limits are not distinct")
+    if missing_limit:
+        if "memory_limit_mb" in broken or fixed_lines[2] != limit_line:
+            raise AssertionError("oom-kill: missing-limit repair has the wrong insertion point")
+    elif fixed != broken.replace("memory_limit_mb = %d" % unsafe_limit, limit_line):
+        raise AssertionError("oom-kill: repair is not a memory-limit-only change")
+    if ("memory_limit_mb = %d" % safe_limit) in broken:
+        raise AssertionError("oom-kill: broken config already contains the safe limit")
+    if not 0 < available < total or not available < high_rss <= used:
+        raise AssertionError("oom-kill: memory figures do not show exhaustion")
+    oom_line = "Out of memory: Killed process %d (%s)" % (killed_pid, process)
+    if journal.count(oom_line) != 1:
+        raise AssertionError("oom-kill: killed PID/process line is missing or ambiguous")
+    if journal.count("safe memory_limit_mb=%d" % safe_limit) != 1:
+        raise AssertionError("oom-kill: safe-limit clue is missing or ambiguous")
+    if process not in fixtures["top.txt"] or str(high_rss) not in fixtures["top.txt"]:
+        raise AssertionError("oom-kill: top does not corroborate the high-memory process")
+    if ("Mem:" in fixtures["free_m.txt"]
+            and str(available) not in fixtures["free_m.txt"]):
+        raise AssertionError("oom-kill: available memory missing from free output")
+
+    killed_answer = "%d:%s" % (killed_pid, process)
+    checks = [
+        hash_check("oom-kill-1", incident,
+                   "Submit the killed PID and process name from the OOM line in "
+                   "`journalctl -u <unit>`, joined by a colon (PID first).",
+                   plain=killed_answer),
+        hash_check("oom-kill-2", "available-%d" % available,
+                   "Submit the numeric available-memory figure in MiB from the Mem row "
+                   "of `free -m`.", plain=str(available)),
+        file_check("oom-kill-3", cfg, fixed, "memory-" + svc,
+                   "Repair %s in place: set only `memory_limit_mb` to the safe limit "
+                   "approved in the journal. If the setting is absent, insert it immediately "
+                   "after `service_name`; otherwise replace only its value." % cfg,
+                   initial=broken),
+    ]
+    instr = (
+        "The service %s was killed after memory exhaustion. Use `journalctl -u %s -n 100 "
+        "--no-pager` and `journalctl -xe` to identify the killed PID/process and the incident's "
+        "approved safe memory limit. Use `free -m` to read the Mem row's available figure and "
+        "`top` to corroborate the high-MEM process.\n\n"
+        "The checked config is %s. Its corrected end state is byte-for-byte the shipped file "
+        "with only `memory_limit_mb` changed to the approved safe limit. If that setting is "
+        "absent, insert it immediately after `service_name`; if present, replace only its value. "
+        "Preserve every other line and edit the file in place."
+        % (unit, unit, cfg)
+    )
+    hints = [
+        "Checklist: journalctl -u <unit> -n 100 --no-pager and journalctl -xe show the "
+        "kernel's OOM kill line; copy the PID and parenthesized process name exactly.",
+        "Checklist: free -m reports memory in MiB; use the available column on the Mem row. "
+        "top orders processes by resource use and corroborates the memory-heavy process.",
+        "Checklist: find the memory-policy incident line for the approved limit, then edit "
+        "only memory_limit_mb in nano. Ctrl+O writes in place and Ctrl+X exits.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("image-pull")
+def t_image_pull(rng, fs, fixtures, soft):
+    """Container-image triage: replace an unavailable tag with the registry's release tag."""
+    name = tok(rng, "pullsvc", 6)
+    digest = hexs(rng, 12)
+    major, minor, patch = rng.randint(2, 6), rng.randint(0, 9), rng.randint(0, 9)
+    correct_tag = "%d.%d.%d" % (major, minor, patch)
+    wrong_tag = correct_tag + "-rc1"
+    image_name = "registry.example/%s" % name
+    correct_image = "%s:%s" % (image_name, correct_tag)
+    wrong_image = "%s:%s" % (image_name, wrong_tag)
+    reason_fragment = tok(rng, "pull", 8)
+    deploy = "/home/trainee/containers/%s.env" % name
+
+    broken_lines = [
+        "# container deployment image (managed by ops)",
+        "IMAGE=%s" % wrong_image,
+        "REPLICAS=2",
+        "RESTART_POLICY=always",
+    ]
+    fixed_lines = list(broken_lines)
+    fixed_lines[1] = "IMAGE=%s" % correct_image
+    broken = "\n".join(broken_lines) + "\n"
+    fixed = "\n".join(fixed_lines) + "\n"
+    wfile(fs, deploy, broken, mode=0o644)
+
+    created = "%d minutes ago" % rng.randint(2, 20)
+    docker_ps = "\n".join([
+        "CONTAINER ID   IMAGE                                 COMMAND                  "
+        "CREATED          STATUS                      PORTS     NAMES",
+        "%s   %-36s  \"/usr/local/bin/entry…\"   %-15s  %-26s            %s"
+        % (digest, wrong_image, created, "Created", name),
+    ]) + "\n"
+    podman_ps = "\n".join([
+        "CONTAINER ID  IMAGE                                 COMMAND               "
+        "CREATED         STATUS                      PORTS       NAMES",
+        "%s  %-36s  /usr/local/bin/entry  %-14s  %-26s              %s"
+        % (digest, wrong_image, created, "Created", name),
+    ]) + "\n"
+    put_fixture_merged(fixtures, "docker_ps_a.txt", docker_ps,
+                       "image-pull", merge_container_ps_fixtures)
+    put_fixture_merged(fixtures, "podman_ps_a.txt", podman_ps,
+                       "image-pull", merge_container_ps_fixtures)
+
+    docker_logs = "# container %s (image-pull)\n%s" % (name, "\n".join([
+        "%s dockerd: Failed to pull image %s: manifest unknown"
+        % (ts(rng), wrong_image),
+        "%s dockerd: Back-off pulling image %s (ImagePullBackOff); request-id=%s"
+        % (ts(rng), wrong_image, reason_fragment),
+        "%s registry.example: tag %s is unavailable; available release image is %s"
+        % (ts(rng), wrong_tag, correct_image),
+    ]) + "\n")
+    podman_logs = "# container %s (image-pull)\n%s" % (name, "\n".join([
+        "%s Error: %s: manifest unknown" % (ts(rng), wrong_image),
+        "%s Back-off pulling image %s (ImagePullBackOff); request-id=%s"
+        % (ts(rng), wrong_image, reason_fragment),
+        "%s registry.example: tag %s is unavailable; available release image is %s"
+        % (ts(rng), wrong_tag, correct_image),
+    ]) + "\n")
+    put_fixture_merged(fixtures, "docker_logs.txt", docker_logs,
+                       "image-pull", merge_reports)
+    put_fixture_merged(fixtures, "podman_logs.txt", podman_logs,
+                       "image-pull", merge_reports)
+
+    inspect_docker = json.dumps([{
+        "Id": digest,
+        "Name": "/" + name,
+        "Config": {"Image": wrong_image, "Env": ["REPLICAS=2"]},
+        "State": {"Status": "created", "Running": False, "ExitCode": 0,
+                  "Error": "manifest unknown; ImagePullBackOff; request-id=" + reason_fragment},
+        "Labels": {"registry-available-tag": correct_tag},
+    }], separators=(",", ":")) + "\n"
+    inspect_podman = json.dumps([{
+        "Id": digest,
+        "Name": name,
+        "Image": wrong_image,
+        "Config": {"Env": ["REPLICAS=2"]},
+        "State": {"Status": "created", "Running": False, "ExitCode": 0,
+                  "Error": "manifest unknown; ImagePullBackOff; request-id=" + reason_fragment},
+        "Labels": {"registry-available-tag": correct_tag},
+    }], separators=(",", ":")) + "\n"
+    put_fixture_merged(fixtures, "docker_inspect.txt", inspect_docker,
+                       "image-pull", merge_inspect_fixtures)
+    put_fixture_merged(fixtures, "podman_inspect.txt", inspect_podman,
+                       "image-pull", merge_inspect_fixtures)
+    put_soft(soft, fixtures, "kubectl_get_pods.txt", "\n".join([
+        "NAME                          READY   STATUS             RESTARTS   AGE",
+        "%-30s 0/1     ImagePullBackOff   0          6m" % name,
+    ]) + "\n", "image-pull")
+
+    if wrong_tag == correct_tag or fixed == broken:
+        raise AssertionError("image-pull: wrong/correct tags are not distinct")
+    if fixed != broken.replace("IMAGE=" + wrong_image, "IMAGE=" + correct_image):
+        raise AssertionError("image-pull: repair is not an IMAGE-only change")
+    if ("IMAGE=%s\n" % correct_image) in broken or ("IMAGE=%s\n" % wrong_image) not in broken:
+        raise AssertionError("image-pull: broken deploy file already solved or lacks wrong tag")
+    for engine in ("docker", "podman"):
+        ps_text = fixtures[engine + "_ps_a.txt"]
+        logs_text = fixtures[engine + "_logs.txt"]
+        inspect = json.loads(fixtures[engine + "_inspect.txt"])
+        own = [obj for obj in inspect
+               if obj.get("Name", "").lstrip("/") == name]
+        if name not in ps_text or wrong_image not in ps_text or "Created" not in ps_text:
+            raise AssertionError("image-pull: %s ps fixture lacks failed container" % engine)
+        if (wrong_image not in logs_text or correct_tag not in logs_text
+                or reason_fragment not in logs_text
+                or "manifest unknown" not in logs_text or "ImagePullBackOff" not in logs_text):
+            raise AssertionError("image-pull: %s logs lack failure/release clues" % engine)
+        if len(own) != 1 or reason_fragment not in own[0]["State"]["Error"]:
+            raise AssertionError("image-pull: %s inspect lacks matching failure" % engine)
+        if own[0]["Labels"]["registry-available-tag"] != correct_tag:
+            raise AssertionError("image-pull: %s inspect lacks correct release tag" % engine)
+
+    checks = [
+        hash_check("image-pull-1", correct_tag,
+                   "Submit the full image name and available release tag shown by the "
+                   "registry clue in `docker logs` / `podman logs`, as name:tag.",
+                   plain=correct_image),
+        hash_check("image-pull-2", reason_fragment,
+                   "Submit the request-id fragment attached to the manifest/pull-back-off "
+                   "failure in the container logs."),
+        file_check("image-pull-3", deploy, fixed, "deploy-" + name,
+                   "Repair %s in place: replace only the `IMAGE` value with the available "
+                   "release image named by the logs and inspect evidence." % deploy,
+                   initial=broken),
+    ]
+    instr = (
+        "A container was created but its image could not be pulled. Triage both supported "
+        "container tools: `docker ps -a` / `podman ps -a` show the stopped container and "
+        "attempted image, `docker logs <name>` / `podman logs <name>` show the pull failure, "
+        "request-id and available release tag, and `docker inspect <name>` / "
+        "`podman inspect <name>` confirm the configured image and failure.\n\n"
+        "The deploy file to repair is %s. Its corrected end state is byte-for-byte the shipped "
+        "file with exactly one change: the `IMAGE` value becomes the available release image "
+        "named by the evidence. Preserve the comment, replica count, restart policy and every "
+        "other byte, and edit the file in place." % deploy
+    )
+    hints = [
+        "Checklist: docker ps -a / podman ps -a lists stopped containers too; match NAMES "
+        "to IMAGE and note that Created does not mean the image pull succeeded.",
+        "Checklist: docker logs <name> / podman logs <name> distinguishes the unavailable "
+        "tag from the registry's available release tag and prints the failure request-id.",
+        "Checklist: docker inspect <name> / podman inspect <name> corroborates Config.Image "
+        "and State.Error; edit only IMAGE in nano, then Ctrl+O writes and Ctrl+X exits.",
+    ]
+    return instr, hints, checks
+
+
 # ---------------------------------------------------------------------------
 # output assembly
 # ---------------------------------------------------------------------------
@@ -2123,7 +2461,7 @@ def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
 # ---------------------------------------------------------------------------
 
 def self_test(seeds, verbose=True):
-    """Generate a full 16-stage terminal set *and* the 8-stage troubleshoot set
+    """Generate a full 16-stage terminal set *and* the 10-stage troubleshoot set
     per seed, then cross-foot every answer against the artefacts on disk.
 
     The templates assert their own load-bearing invariants while generating (e.g.
@@ -2132,7 +2470,7 @@ def self_test(seeds, verbose=True):
     order, file checks not shipped pre-solved, no answer dump under ``fs/``, the
     two drill-specific claims (top talker, config-drift baseline token), and for
     troubleshoot: the full 30-fixture contract, broken initial files, and
-    scenario-specific clue placement, including both wave-four drills.
+    scenario-specific clue placement, including both wave-five drills.
     """
     import re
     import tempfile
@@ -2146,6 +2484,12 @@ def self_test(seeds, verbose=True):
 
     top_re = re.compile(r"(/var/log/sre/access-[^\s]+\.log)")
     drift_re = re.compile(r"(/home/trainee/drift-[^\s]+)/app\.conf")
+
+    def snapshot(text, label):
+        marker = "# snapshot %s\n" % label
+        if marker not in text:
+            return ""
+        return text.split(marker, 1)[1].split("\n\n# snapshot ", 1)[0]
 
     for seed in seeds:
         with tempfile.TemporaryDirectory(prefix="sre-selftest.") as tmp:
@@ -2255,7 +2599,7 @@ def self_test(seeds, verbose=True):
                 check("answers.json" not in filenames,
                       "seed %d: answers.json leaked into %s" % (seed, dirpath))
 
-            # ---- troubleshoot profile: all eight templates, all 30 fixtures ----
+            # ---- troubleshoot profile: all ten templates, all 30 fixtures ----
             with tempfile.TemporaryDirectory(prefix="sre-selftest-ts.") as ts_tmp:
                 ts_dump_path = os.path.join(ts_tmp, "answers.json")
                 ts_stages, ts_order, ts_final = write_outputs(
@@ -2536,6 +2880,110 @@ def self_test(seeds, verbose=True):
                     check(port_ans[0] not in port_instr and held_port not in port_instr
                           and (not free_port or free_port not in port_instr),
                           "seed %d: port instruction reveals a hash/file answer" % seed)
+                if "oom-kill" in ts_order:
+                    with open(os.path.join(ts_fixtures, "journalctl_unit.txt"),
+                              encoding="utf-8") as fh:
+                        oom_journal = fh.read()
+                    with open(os.path.join(ts_fixtures, "free_m.txt"),
+                              encoding="utf-8") as fh:
+                        oom_free = snapshot(fh.read(), "oom-kill")
+                    with open(os.path.join(ts_fixtures, "top.txt"),
+                              encoding="utf-8") as fh:
+                        oom_top = snapshot(fh.read(), "oom-kill")
+                    oom_checks = ts_dump["stages"]["oom-kill"]["checks"]
+                    oom_ans = [c["answer"] for c in oom_checks]
+                    killed_pid, process = oom_ans[0].split(":", 1)
+                    oom_match = re.search(
+                        r"Out of memory: Killed process (\d+) \(([^)]+)\)", oom_journal)
+                    safe_match = re.search(r"safe memory_limit_mb=(\d+)", oom_journal)
+                    avail_match = re.search(r"^Mem:.*\s(\d+)$", oom_free, re.MULTILINE)
+                    process_row = next((line for line in oom_top.splitlines()
+                                        if process in line), "")
+                    row_fields = process_row.split()
+                    oom_cfg = os.path.join(ts_fs, oom_checks[2]["path"].lstrip("/"))
+                    with open(oom_cfg, encoding="utf-8") as fh:
+                        oom_broken = fh.read()
+                    safe_line = ("memory_limit_mb = " + safe_match.group(1)
+                                 if safe_match else "")
+                    if "memory_limit_mb = " in oom_broken:
+                        expected_oom = oom_broken.replace(
+                            next(line for line in oom_broken.splitlines()
+                                 if line.startswith("memory_limit_mb = ")), safe_line)
+                    else:
+                        expected_lines = oom_broken.splitlines()
+                        service_index = next(i for i, line in enumerate(expected_lines)
+                                             if line.startswith("service_name = "))
+                        expected_lines.insert(service_index + 1, safe_line)
+                        expected_oom = "\n".join(expected_lines) + "\n"
+                    oom_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                          % ts_dump["stages"]["oom-kill"]["index"])
+                    with open(os.path.join(oom_sd, "instruction"), encoding="utf-8") as fh:
+                        oom_instr = fh.read()
+                    check(oom_match is not None
+                          and oom_match.groups() == (killed_pid, process)
+                          and oom_journal.count("Out of memory: Killed process") == 1,
+                          "seed %d: OOM killed PID/process line is missing or ambiguous" % seed)
+                    check(safe_match is not None and avail_match is not None
+                          and avail_match.group(1) == oom_ans[1],
+                          "seed %d: OOM safe-limit/free-available clues are inconsistent" % seed)
+                    check(len(row_fields) >= 12 and row_fields[0] == killed_pid
+                          and row_fields[-1] == process
+                          and int(row_fields[5]) > int(oom_ans[1]),
+                          "seed %d: OOM top evidence does not corroborate high memory" % seed)
+                    check(oom_ans[2] == expected_oom and oom_ans[2] != oom_broken,
+                          "seed %d: OOM repair is not the exact memory-limit change" % seed)
+                    check(all(command in oom_instr for command in
+                              ("journalctl -u", "journalctl -xe", "free -m", "top")),
+                          "seed %d: OOM instruction omits its command checklist" % seed)
+                    check(oom_ans[0] not in oom_instr and process not in oom_instr,
+                          "seed %d: OOM instruction reveals a hash answer" % seed)
+                if "image-pull" in ts_order:
+                    image_checks = ts_dump["stages"]["image-pull"]["checks"]
+                    image_ans = [c["answer"] for c in image_checks]
+                    image_cfg = os.path.join(ts_fs, image_checks[2]["path"].lstrip("/"))
+                    with open(image_cfg, encoding="utf-8") as fh:
+                        image_broken = fh.read()
+                    wrong_match = re.search(r"^IMAGE=(.+)$", image_broken, re.MULTILINE)
+                    wrong_image = wrong_match.group(1) if wrong_match else ""
+                    container_name = os.path.basename(image_checks[2]["path"])[:-4]
+                    check(bool(wrong_image) and wrong_image != image_ans[0]
+                          and image_ans[2] == image_broken.replace(
+                              "IMAGE=" + wrong_image, "IMAGE=" + image_ans[0]),
+                          "seed %d: image-pull repair is not an IMAGE-only change" % seed)
+                    for engine in ("docker", "podman"):
+                        with open(os.path.join(ts_fixtures, engine + "_ps_a.txt"),
+                                  encoding="utf-8") as fh:
+                            image_ps = fh.read()
+                        with open(os.path.join(ts_fixtures, engine + "_logs.txt"),
+                                  encoding="utf-8") as fh:
+                            image_logs = fh.read()
+                        with open(os.path.join(ts_fixtures, engine + "_inspect.txt"),
+                                  encoding="utf-8") as fh:
+                            image_inspect = json.load(fh)
+                        own = next((obj for obj in image_inspect
+                                    if obj.get("Name", "").lstrip("/") == container_name), {})
+                        check(container_name in image_ps and wrong_image in image_ps
+                              and "Created" in image_ps,
+                              "seed %d: %s image-pull ps evidence missing" % (seed, engine))
+                        check(wrong_image in image_logs and image_ans[0] in image_logs
+                              and image_ans[1] in image_logs
+                              and "manifest unknown" in image_logs
+                              and "ImagePullBackOff" in image_logs,
+                              "seed %d: %s image-pull log clues missing" % (seed, engine))
+                        check(own.get("Labels", {}).get("registry-available-tag")
+                              == image_ans[0].rsplit(":", 1)[-1]
+                              and image_ans[1] in own.get("State", {}).get("Error", ""),
+                              "seed %d: %s image-pull inspect clues missing" % (seed, engine))
+                    image_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                            % ts_dump["stages"]["image-pull"]["index"])
+                    with open(os.path.join(image_sd, "instruction"), encoding="utf-8") as fh:
+                        image_instr = fh.read()
+                    check(all(command in image_instr for command in
+                              ("docker ps -a", "podman ps -a", "docker logs", "podman logs",
+                               "docker inspect", "podman inspect")),
+                          "seed %d: image-pull instruction omits its command checklist" % seed)
+                    check(image_ans[0] not in image_instr and image_ans[1] not in image_instr,
+                          "seed %d: image-pull instruction reveals a hash answer" % seed)
 
                 if verbose:
                     print("selftest seed %d: troubleshoot %d stages + %d fixtures checked"

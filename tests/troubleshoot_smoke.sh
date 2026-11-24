@@ -8,7 +8,7 @@
 # paths and byte-for-byte passthrough.
 #
 # Part 2 (runs when the generator has --profile support): generate the default
-# eight-template pool and ordered PICK subsets, then assert the fixture contract,
+# ten-template pool and ordered PICK subsets, then assert the fixture contract,
 # manifests, checks.tsv shape, stage/final flag recomputation, generated scenario
 # clues and that no file check ships already solved. If the generator has no
 # troubleshoot profile yet, part 2 is reported as pending (a SKIP, not a failure).
@@ -409,6 +409,14 @@ def fixture(name):
         return fh.read()
 
 
+def snapshot(name, label):
+    marker = "# snapshot " + label + "\n"
+    text = fixture(name)
+    if marker not in text:
+        return ""
+    return text.split(marker, 1)[1].split("\n\n# snapshot ", 1)[0].strip() + "\n"
+
+
 # The T16 fixture contract: every name is always emitted, flat, nothing else.
 FIXTURES = [
     "systemctl_status.txt", "journalctl_unit.txt", "journalctl_xe.txt",
@@ -421,7 +429,8 @@ FIXTURES = [
     "kubectl_get_events.txt", "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
 ]
 POOL = ["svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
-        "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict"]
+        "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict",
+        "oom-kill", "image-pull"]
 NEUTRAL = "no data for this scenario\n"
 PICK = pick_arg.split(",") if pick_arg else None
 expected_count = len(PICK) if PICK else len(POOL)
@@ -453,7 +462,7 @@ if PICK:
 else:
     emit(len(stage_lines) == len(POOL) and len(set(stage_lines)) == len(POOL)
          and set(stage_lines) == set(POOL),
-         "default generation selects each of the eight templates exactly once",
+         "default generation selects each of the ten templates exactly once",
          repr(stage_lines))
     emit(dump.get("order") == stage_lines,
          "answers dump order matches the default manifest order", repr(dump.get("order")))
@@ -573,9 +582,11 @@ for index, sid in enumerate(stage_lines, 1):
         for engine in ("docker", "podman"):
             ps_text = fixture(engine + "_ps_a.txt")
             logs_text = fixture(engine + "_logs.txt")
-            inspect = json.loads(fixture(engine + "_inspect.txt"))[0]
-            states.append(inspect["State"])
-            envs.append(inspect["Config"]["Env"])
+            inspected = json.loads(fixture(engine + "_inspect.txt"))
+            inspect = next((obj for obj in inspected
+                            if obj.get("Name", "").lstrip("/") == name), {})
+            states.append(inspect.get("State", {}))
+            envs.append(inspect.get("Config", {}).get("Env", []))
             emit(name in ps_text and ("Exited (%s)" % exit_code) in ps_text,
                  "container-crash: %s ps fixture has the checked name and exit" % engine)
             emit(missing_var in logs_text,
@@ -584,8 +595,18 @@ for index, sid in enumerate(stage_lines, 1):
                  and str(inspect["State"].get("ExitCode")) == exit_code
                  and missing_var not in inspect["Config"]["Env"],
                  "container-crash: %s inspect fixture confirms exit and missing env" % engine)
-        emit(fixture("docker_logs.txt") == fixture("podman_logs.txt"),
-             "container-crash: docker and podman log fixtures agree")
+        if "image-pull" in stage_lines:
+            log_marker = "# container %s (container-crash)\n" % name
+            docker_report = fixture("docker_logs.txt").split(log_marker, 1)[-1]
+            podman_report = fixture("podman_logs.txt").split(log_marker, 1)[-1]
+            docker_report = docker_report.split("\n\n# container ", 1)[0]
+            podman_report = podman_report.split("\n\n# container ", 1)[0]
+            emit(bool(log_marker in fixture("docker_logs.txt"))
+                 and docker_report == podman_report,
+                 "container-crash: shared Docker/Podman log report still agrees with image-pull")
+        else:
+            emit(fixture("docker_logs.txt") == fixture("podman_logs.txt"),
+                 "container-crash: docker and podman log fixtures agree")
         emit(states[0].get("ExitCode") == states[1].get("ExitCode") and envs[0] == envs[1],
              "container-crash: docker and podman inspection facts agree")
 
@@ -770,6 +791,113 @@ for index, sid in enumerate(stage_lines, 1):
              and (not free_value or free_value not in hint_text),
              "port-conflict: instruction and hints do not reveal answers")
 
+    if sid == "oom-kill":
+        killed_answer = dumped[0]["answer"]
+        available = dumped[1]["answer"]
+        checked_path = dumped[2]["path"]
+        fixed_text = dumped[2]["answer"]
+        killed_pid, process = killed_answer.split(":", 1)
+        journal = fixture("journalctl_unit.txt")
+        oom_matches = re.findall(
+            r"Out of memory: Killed process (\d+) \(([^)]+)\)", journal)
+        safe_matches = re.findall(r"safe memory_limit_mb=(\d+)", journal)
+        free_report = snapshot("free_m.txt", "oom-kill")
+        top_report = snapshot("top.txt", "oom-kill")
+        mem_line = next((line for line in free_report.splitlines()
+                         if line.startswith("Mem:")), "")
+        mem_fields = mem_line.split()
+        shown_available = mem_fields[-1] if mem_fields else ""
+        process_row = next((line for line in top_report.splitlines()
+                            if process in line), "")
+        row_fields = process_row.split()
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        initial_lines = initial_text.splitlines()
+        fixed_lines = fixed_text.splitlines()
+        changed = [(a, b) for a, b in zip(initial_lines, fixed_lines) if a != b]
+        safe_line = "memory_limit_mb = " + (safe_matches[0] if safe_matches else "")
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "oom-kill: two hash checks precede the file check")
+        emit(re.fullmatch(r"/etc/([^/]+)/\1\.conf", checked_path) is not None,
+             "oom-kill: checked config follows /etc/<svc>/<svc>.conf")
+        emit(len(oom_matches) == 1 and oom_matches[0] == (killed_pid, process),
+             "oom-kill: journal has one checked OOM PID/process line")
+        emit(len(safe_matches) == 1 and shown_available == available,
+             "oom-kill: journal safe-limit clue and free available figure are unambiguous")
+        emit(len(row_fields) >= 12 and row_fields[0] == killed_pid
+             and row_fields[-1] == process and int(row_fields[5]) > int(available),
+             "oom-kill: top corroborates the killed high-MEM process")
+        if any(line.startswith("memory_limit_mb = ") for line in initial_lines):
+            expected_fixed = initial_text.replace(
+                next(line for line in initial_lines if line.startswith("memory_limit_mb = ")),
+                safe_line)
+            emit(len(initial_lines) == len(fixed_lines) and len(changed) == 1
+                 and fixed_text == expected_fixed,
+                 "oom-kill: repair replaces only the unsafe memory limit")
+        else:
+            expected_lines = list(initial_lines)
+            service_index = next((i for i, line in enumerate(expected_lines)
+                                  if line.startswith("service_name = ")), -1)
+            if service_index >= 0:
+                expected_lines.insert(service_index + 1, safe_line)
+            emit(service_index >= 0 and fixed_text == "\n".join(expected_lines) + "\n",
+                 "oom-kill: repair inserts the missing limit after service_name")
+        emit(all(fixture(name) != NEUTRAL
+                 for name in ("journalctl_unit.txt", "journalctl_xe.txt",
+                              "free_m.txt", "top.txt")),
+             "oom-kill: journal and resource fixtures contain scenario data")
+        emit(all(command in instruction for command in
+                  ("journalctl -u", "journalctl -xe", "free -m", "top")),
+             "oom-kill: instruction teaches journal, free and top triage")
+        emit(killed_answer not in instruction and process not in instruction
+             and process not in hint_text and (not safe_matches or safe_matches[0] not in hint_text),
+             "oom-kill: instruction and hints do not reveal answers")
+
+    if sid == "image-pull":
+        correct_image = dumped[0]["answer"]
+        reason_fragment = dumped[1]["answer"]
+        checked_path = dumped[2]["path"]
+        fixed_text = dumped[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        image_match = re.search(r"^IMAGE=(.+)$", initial_text, re.MULTILINE)
+        wrong_image = image_match.group(1) if image_match else ""
+        correct_tag = correct_image.rsplit(":", 1)[-1]
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "image-pull: two hash checks precede the file check")
+        emit(bool(wrong_image) and wrong_image != correct_image
+             and fixed_text == initial_text.replace("IMAGE=" + wrong_image,
+                                                    "IMAGE=" + correct_image),
+             "image-pull: repair changes only IMAGE to the available release")
+        for engine in ("docker", "podman"):
+            ps_text = fixture(engine + "_ps_a.txt")
+            logs_text = fixture(engine + "_logs.txt")
+            inspected = json.loads(fixture(engine + "_inspect.txt"))
+            container_name = re.search(r"/home/trainee/containers/([^/]+)\.env",
+                                       checked_path)
+            name = container_name.group(1) if container_name else ""
+            inspect = next((obj for obj in inspected
+                            if obj.get("Name", "").lstrip("/") == name), {})
+            emit(bool(name) and name in ps_text and wrong_image in ps_text
+                 and "Created" in ps_text,
+                 "image-pull: %s ps fixture shows the failed container" % engine)
+            emit(wrong_image in logs_text and correct_image in logs_text
+                 and reason_fragment in logs_text and "manifest unknown" in logs_text
+                 and "ImagePullBackOff" in logs_text,
+                 "image-pull: %s logs carry wrong/correct tags and failure fragment" % engine)
+            emit(inspect.get("Labels", {}).get("registry-available-tag") == correct_tag
+                 and reason_fragment in inspect.get("State", {}).get("Error", ""),
+                 "image-pull: %s inspect confirms release tag and failure" % engine)
+        emit(all(command in instruction for command in
+                  ("docker ps -a", "podman ps -a", "docker logs", "podman logs",
+                   "docker inspect", "podman inspect")),
+             "image-pull: instruction teaches Docker and Podman triage")
+        emit(correct_image not in instruction and reason_fragment not in instruction
+             and correct_image not in hint_text and reason_fragment not in hint_text,
+             "image-pull: instruction and hints do not reveal answers")
+
 last = stage_lines[-1] if stage_lines else None
 emit(last is not None and dump["final_flag"] == dump["stages"][last]["flag"],
      "final flag is the last stage flag")
@@ -838,7 +966,7 @@ PY
         fi
     }
 
-    run_generator_case "default eight-template troubleshoot generation" default 8
+    run_generator_case "default ten-template troubleshoot generation" default 10
     run_generator_case "original two-template PICK" pilot-pick 2 \
         svc-crashloop,k8s-crashloop
     # A reversed, non-pool order and a deliberately different SET prove PICK
@@ -853,6 +981,10 @@ PY
         selinux-avc,port-conflict
     run_generator_case "wave-four PICK in reversed order" wave4-reversed 8 \
         port-conflict,selinux-avc
+    run_generator_case "wave-five two-template PICK" wave5-pick 1 \
+        oom-kill,image-pull
+    run_generator_case "wave-five PICK in reversed order" wave5-reversed 10 \
+        image-pull,oom-kill
 fi
 
 # ---------------------------------------------------------------- summary
