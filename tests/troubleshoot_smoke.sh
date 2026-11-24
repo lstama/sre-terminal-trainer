@@ -489,7 +489,8 @@ for index, sid in enumerate(stage_lines, 1):
         instruction = fh.read()
     with open(os.path.join(sd, "hint"), encoding="utf-8") as fh:
         hint_text = fh.read()
-    emit(hint_text.strip() != "", "%s: hint file is non-empty" % sid)
+    emit(hint_text.strip() != "" and "%%" not in instruction and "%%" not in hint_text,
+         "%s: hint is non-empty and stage prose has no literal double percent" % sid)
     emit(all(c.get("id") in instruction for c in checks),
          "%s: instruction names every check id" % sid)
 

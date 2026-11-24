@@ -1389,7 +1389,7 @@ def t_disk_full(rng, fs, fixtures, soft):
         "closing brace unchanged, and edit the file in place." % rot
     )
     hints = [
-        "Checklist: df -h lists every mount with its Use%%; the one at 100%% is the "
+        "Checklist: df -h lists every mount with its Use%; the one at 100% is the "
         "partition that filled up (its 'Mounted on' value is the answer).",
         "Checklist: du -sh /var/log/* | sort -h orders directories by size; the largest is "
         "the runaway log directory and its name carries the service id.",
