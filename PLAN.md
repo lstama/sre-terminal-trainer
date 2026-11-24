@@ -84,7 +84,7 @@ egress); the drills are all local files.
   was needed; the loopback publish and the 4755 verifier behave identically (rootless
   Podman maps container-root into the user namespace, where setuid still works).
 - **Host credentials are generated per instance** by `up` (mode 0600, never committed).
-- **Day 2 is the `troubleshoot` profile.** A second profile (`PROFILE=troubleshoot`)
+- **The `troubleshoot` profile provides the second set of challenges.** The `PROFILE=troubleshoot` profile
   reuses the same harness for sixteen diagnostic templates (`svc-crashloop`,
   `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`,
   `selinux-avc`, `port-conflict`, `oom-kill`, `image-pull`, `svc-selector`,

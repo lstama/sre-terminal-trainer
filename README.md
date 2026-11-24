@@ -48,7 +48,7 @@ make best        # your local runs, fastest first
 
 `make new` tears down and starts a fresh challenge set. Run `make help` for the full target list.
 
-## Day 2 troubleshoot profile
+## Troubleshoot profile
 
 A second profile (`PROFILE=troubleshoot`) reuses this same harness for sixteen diagnostic templates: service and Kubernetes crash loops (`svc-crashloop`, `k8s-crashloop`), disk-space and container-crash triage (`disk-full`, `container-crash`), nginx configuration/ownership checks (`nginx-config`), DNS/endpoint mismatch triage (`dns-mismatch`), SELinux access-denial investigation (`selinux-avc`), process/port collision triage (`port-conflict`), memory-exhaustion/OOM investigation (`oom-kill`), container-image pull failures (`image-pull`), Kubernetes Service-selector mismatch triage (`svc-selector`), Kubernetes OOM/resource-limit investigation (`resource-limits`), TLS certificate-expiry investigation (`tls-expiry`), downstream-dependency failure triage (`dependency-down`), filtered-port/unreachable-service triage (`blocked-port`), and file permission/ownership triage (`perm-denied`). Alongside `systemctl`, `journalctl`, `ss`, `ps`, `kubectl`, `df`, `du`, `free`, `top`, `docker` and `podman`, they exercise `nginx -t`, `ls -l`, `stat`, `getenforce`, `ausearch`, `curl`, `dig`, `nslookup`, `ping` and `nc`. The diagnostic commands are mocked: one small compiled binary is symlinked under each command name and prints a fixture, while `ls -l` and `stat` read real file metadata. There is no privileged container, live service stack, web server or container runtime behind them.
 

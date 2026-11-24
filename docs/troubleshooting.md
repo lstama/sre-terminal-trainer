@@ -1,4 +1,4 @@
-# Day 2: the troubleshoot profile
+# Troubleshooting challenges: the troubleshoot profile
 
 The trainer's second profile is a pool of sixteen diagnostic drills whose terminal
 commands are answered from fixtures instead of a live machine. It exists to
