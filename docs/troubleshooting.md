@@ -111,10 +111,10 @@ make ssh
 - `PICK` names the exact stages and their order for this build (`--pick` in the
   generator). With `PICK` set, `SET` does not decide the count; the picked list
   does.
-- With no `PICK`, the build takes a seeded random sample of the pilot pool, so
-  `SET` must be within the pool size — `make up PROFILE=troubleshoot SET=2`.
-  The default `SET=8` belongs to the terminal profile and the generator rejects
-  it for this two-stage pool, so pass `SET` explicitly if you omit `PICK`.
+- With no `PICK`, this profile defaults to `SET=2`, selecting both pilot
+  templates in seeded order. `SET=1` selects one; any other value is rejected
+  before the build because the pilot supports only 1–2 stages. The terminal
+  profile keeps its default `SET=8`.
 - `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
   corpus; the generator layer is keyed on the build arguments, so an unchanged
   `SEED` and `PICK` reuse the cached layer.

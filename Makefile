@@ -37,7 +37,8 @@ BUILD_PROFILE_ARGS :=
 endif
 
 PORT      ?= 2222
-SET       ?= 8
+# The troubleshoot pilot has only two templates; keep the terminal default at 8.
+SET       ?= $(if $(filter troubleshoot,$(PROFILE)),2,8)
 SEED      ?=
 SSH_USER  ?= trainee
 
@@ -65,7 +66,7 @@ help:
 	  '  make down               save completion records, then remove the container' \
 	  '  make new                down + up with a fresh random seed' \
 	  '  make best               local completion records, fastest first' \
-	  '  make test               up/down cycle, then assert the tree stays clean' \
+	  '  make test               verifier + troubleshoot smoke, up/down, clean tree' \
 	  '  make demo               re-record docs/demo/sample-run.mp4 and .gif (needs vhs)' \
 	  '  make demo-mp4           re-record only the MP4 deliverable' \
 	  '  make demo-gif           re-record only the GIF deliverable' \
@@ -80,6 +81,12 @@ help:
 	  'Both are gitignored; only source, config and docs are committed.'
 
 up:
+	@if [ '$(PROFILE)' = troubleshoot ]; then
+	  case '$(SET)' in
+	    1|2) ;;
+	    *) echo "error: PROFILE=troubleshoot supports SET=1 or SET=2 (pilot range 1-2); got $(SET)" >&2; exit 1 ;;
+	  esac
+	fi
 	@mkdir -p $(INSTANCE) $(STATE)
 	chmod 700 $(INSTANCE)
 	if [ ! -s $(CREDS) ]; then
@@ -209,6 +216,10 @@ best:
 	python3 tools/best.py $(STATE)/records.jsonl
 
 test:
+	@printf '==> verifier smoke\n'
+	sh tests/smoke.sh
+	@printf '==> troubleshoot smoke\n'
+	sh tests/troubleshoot_smoke.sh
 	@printf '==> up/down cycle\n'
 	$(MAKE) --no-print-directory up
 	$(MAKE) --no-print-directory down
@@ -224,7 +235,7 @@ test:
 	  printf 'FAIL: working tree not clean after up/down:\n%s\n' "$$(git status --porcelain)" >&2
 	  exit 1
 	fi
-	printf '==> OK: image builds, container runs, tree is clean\n'
+	printf '==> OK: smoke tests pass, image builds, container runs, tree is clean\n'
 
 clean:
 	@$(ENGINE) rm -f '$(CONTAINER)' >/dev/null 2>&1 || true
