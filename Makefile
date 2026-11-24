@@ -75,7 +75,7 @@ help:
 	  'Variables: ENGINE (podman|docker, auto-detected), IMAGE, CONTAINER,' \
 	  '           PORT, SET, SEED, SSH_USER, INSTANCE (.instance), STATE (state),' \
 	  '           PROFILE (terminal|troubleshoot, default terminal),' \
-	  '           PICK (comma-separated troubleshoot template ids; empty = pool)' \
+	  '           PICK (comma-separated troubleshoot template ids; empty = seeded selection from the pool)' \
 	  '' \
 	  'State lives in .instance/ (0600 credentials) and state/ (records).' \
 	  'Both are gitignored; only source, config and docs are committed.'
@@ -117,7 +117,7 @@ up:
 	  *) echo "error: PROFILE must be terminal or troubleshoot" >&2; exit 1 ;;
 	esac
 	if [ '$(PROFILE)' = troubleshoot ]; then
-	  printf '==> profile=troubleshoot pick=%s (default container/image names)\n' '$(PICK)'
+	  printf '==> profile=troubleshoot pick=%s (image/container names are the troubleshoot ones)\n' '$(PICK)'
 	fi
 	printf '==> building %s (seed=%s set=%s, engine=%s)\n' '$(IMAGE)' "$$seed" '$(SET)' '$(ENGINE)'
 	$(ENGINE) build $(BUILD_TARGET:%=--target %) \

@@ -1,4 +1,4 @@
-# Day 2: the troubleshoot pilot
+# Day 2: the troubleshoot profile (two-stage pilot)
 
 The trainer's second profile is a small set of diagnostic drills whose terminal
 commands are answered from fixtures instead of a live machine. It exists to
@@ -83,7 +83,7 @@ Orchestration detail, not something a trainee needs to act on.
 - **Selection is a small explicit parser, not a shell.** `journalctl -u UNIT -n
   100 --no-pager` accepts those three flags in any order; `journalctl -xe` is
   its own form. `kubectl` distinguishes `get pods`, `get events`, `get
-  configmap NAME`, `get deploy …`, `describe pod NAME` and `logs POD`.
+  configmap NAME`, `get deploy NAME`, `describe pod NAME` and `logs POD`.
   `docker`/`podman` distinguish `ps -a`, `logs` and `inspect`. The general
   triage commands have one fixture each, selected by their documented form:
   `ps aux`, `ss -tlnp`, `df -h`, `free -m`, `top`, `du -sh DIR`, `nginx -t`,
@@ -147,7 +147,7 @@ mock command the stage expects next:
 ```sh
 verify next        # the current stage brief, with check ids and submit forms
 verify hint        # hint 1 of the stage
-verify hint 2      # with the in-stage reason and the commands to run
+verify hint 2      # the reason and the commands for this stage
 verify hint 9      # show everything for the stage
 verify status      # stage, elapsed time, checks done
 ```
