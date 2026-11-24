@@ -846,7 +846,7 @@ FIXTURE_NAMES = [
     "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
 ]
 NEUTRAL_FIXTURE = "no data for this scenario\n"
-# The Day 2 troubleshoot pool.  Order matters only for the seeded (no --pick)
+# The troubleshoot pool.  Order matters only for the seeded (no --pick)
 # selection; --pick uses the caller's order verbatim.  Each id is one stage
 # template; every run still emits all 32 fixtures above (unused = NEUTRAL).
 TROUBLESHOOT_IDS = [
