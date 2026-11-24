@@ -8,7 +8,7 @@
 # paths and byte-for-byte passthrough.
 #
 # Part 2 (runs when the generator has --profile support): generate the default
-# four-template pool and ordered PICK subsets, then assert the fixture contract,
+# six-template pool and ordered PICK subsets, then assert the fixture contract,
 # manifests, checks.tsv shape, stage/final flag recomputation, generated scenario
 # clues and that no file check ships already solved. If the generator has no
 # troubleshoot profile yet, part 2 is reported as pending (a SKIP, not a failure).
@@ -232,6 +232,42 @@ cat >"$FIX/dig.txt" <<'EOF'
 example.test.   300   IN   A   192.0.2.10
 EOF
 
+cat >"$FIX/nslookup.txt" <<'EOF'
+Server: 192.0.2.53
+Name: example.test
+Address: 192.0.2.10
+EOF
+
+cat >"$FIX/curl_I.txt" <<'EOF'
+HTTP/1.1 502 Bad Gateway
+Server: edge-demo
+EOF
+
+cat >"$FIX/curl_v.txt" <<'EOF'
+*   Trying 192.0.2.10:8080...
+* connect to stale.example.test (192.0.2.10) port 8080 failed: Connection refused
+* connection conn-demo: refused
+EOF
+
+cat >"$FIX/ping.txt" <<'EOF'
+PING stale.example.test (192.0.2.10) 56(84) bytes of data.
+64 bytes from stale.example.test: icmp_seq=1 ttl=62 time=2.4 ms
+EOF
+
+cat >"$FIX/nc_zv.txt" <<'EOF'
+nc: connect to stale.example.test port 8080 (tcp) failed: Connection refused
+connection conn-demo: refused
+EOF
+
+cat >"$FIX/getenforce.txt" <<'EOF'
+Permissive
+EOF
+
+cat >"$FIX/ausearch_avc.txt" <<'EOF'
+----
+<no matches>
+EOF
+
 # ---------------------------------------------------------------- dispatch
 printf '\n== systemctl ==\n'
 expect_fixture "systemctl status SERVICE -> systemctl_status.txt" systemctl_status.txt \
@@ -300,13 +336,25 @@ expect_fixture "du -sh DIR -> du_sh.txt" du_sh.txt du -sh /var/log/demo
 expect_fixture "free -m -> free_m.txt" free_m.txt free -m
 expect_fixture "top -> top.txt" top.txt top
 expect_fixture "nginx -t -> nginx_t.txt" nginx_t.txt nginx -t
+expect_fixture "getenforce -> getenforce.txt" getenforce.txt getenforce
+expect_fixture "ausearch -m avc -> ausearch_avc.txt" ausearch_avc.txt ausearch -m avc
+expect_fixture "curl -v URL -> curl_v.txt" curl_v.txt curl -v http://example.test
+expect_fixture "curl -I URL -> curl_I.txt" curl_I.txt curl -I http://example.test
 expect_fixture "dig takes its single fixture for any query" dig.txt dig example.test A
+expect_fixture "nslookup takes its single fixture for any query" nslookup.txt nslookup example.test
+expect_fixture "ping takes its single fixture for any query" ping.txt ping -c 2 example.test
+expect_fixture "nc -zv HOST PORT -> nc_zv.txt" nc_zv.txt nc -zv example.test 8080
 expect_reject "ss without -tlnp is rejected" 'unsupported invocation' ss -tulpn
 expect_reject "df without -h is rejected" 'unsupported invocation' df
 expect_reject "du without -sh is rejected" 'unsupported invocation' du -s /var/log/demo
 expect_reject "free without -m is rejected" 'unsupported invocation' free -h
 expect_reject "top with arguments is rejected" 'unsupported invocation' top -b
 expect_reject "nginx without -t is rejected" 'unsupported invocation' nginx -s reload
+expect_reject "getenforce with arguments is rejected" 'unsupported invocation' getenforce -v
+expect_reject "ausearch without -m avc is rejected" 'unsupported invocation' ausearch -m all
+expect_reject "curl without a URL is rejected" 'unsupported invocation' curl -v
+expect_reject "curl -s is not implemented" 'unsupported invocation' curl -s http://example.test
+expect_reject "nc without -zv is rejected" 'unsupported invocation' nc -z example.test 8080
 
 printf '\n== failure paths ==\n'
 mkdir -p "$WORK/empty"
@@ -332,6 +380,7 @@ else
 import hashlib
 import json
 import os
+import re
 import sys
 
 out, answers_path, pick_arg = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -371,7 +420,8 @@ FIXTURES = [
     "kubectl_get_pods.txt", "kubectl_describe_pod.txt", "kubectl_logs.txt",
     "kubectl_get_events.txt", "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
 ]
-POOL = ["svc-crashloop", "k8s-crashloop", "disk-full", "container-crash"]
+POOL = ["svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
+        "nginx-config", "dns-mismatch"]
 NEUTRAL = "no data for this scenario\n"
 PICK = pick_arg.split(",") if pick_arg else None
 expected_count = len(PICK) if PICK else len(POOL)
@@ -403,7 +453,7 @@ if PICK:
 else:
     emit(len(stage_lines) == len(POOL) and len(set(stage_lines)) == len(POOL)
          and set(stage_lines) == set(POOL),
-         "default generation selects each of the four templates exactly once",
+         "default generation selects each of the six templates exactly once",
          repr(stage_lines))
     emit(dump.get("order") == stage_lines,
          "answers dump order matches the default manifest order", repr(dump.get("order")))
@@ -518,6 +568,83 @@ for index, sid in enumerate(stage_lines, 1):
         emit(states[0].get("ExitCode") == states[1].get("ExitCode") and envs[0] == envs[1],
              "container-crash: docker and podman inspection facts agree")
 
+    if sid == "nginx-config":
+        error_fragment = dumped[0]["answer"]
+        owner = dumped[1]["answer"]
+        checked_path = dumped[2]["path"]
+        fixed_text = dumped[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        initial_lines = initial_text.splitlines()
+        fixed_lines = fixed_text.splitlines()
+        changed = [(a, b) for a, b in zip(initial_lines, fixed_lines) if a != b]
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "nginx-config: two hash checks precede the file check")
+        emit(owner == "nginx", "nginx-config: checked owner is the nginx service user")
+        nginx_text = fixture("nginx_t.txt")
+        line_match = re.fullmatch(r"nginx-L(\d+)-[0-9a-f]+", error_fragment)
+        emit(line_match is not None and checked_path in nginx_text
+             and error_fragment in nginx_text
+             and (":" + line_match.group(1) in nginx_text if line_match else False),
+             "nginx-config: nginx -t carries the checked path, line and error fragment")
+        emit(len(initial_lines) == len(fixed_lines) and len(changed) == 2
+             and sum(a + ";" == b for a, b in changed) == 1
+             and sum(a.strip().startswith("server_name ")
+                     and b.strip().startswith("server_name ") for a, b in changed) == 1,
+             "nginx-config: broken-to-fixed diff is one semicolon and one server_name")
+        reference_match = re.search(r"(/etc/nginx/references/[^\s`]+\.conf)", instruction)
+        emit(reference_match is not None,
+             "nginx-config: instruction names the service-owned reference asset")
+        if reference_match:
+            with open(os.path.join(out, "fs", reference_match.group(1).lstrip("/")),
+                      encoding="utf-8") as fh:
+                reference_text = fh.read()
+            fixed_server = next((line.strip() for line in fixed_lines
+                                 if line.strip().startswith("server_name ")), "")
+            emit(bool(fixed_server) and fixed_server in reference_text,
+                 "nginx-config: reference carries the corrected server_name")
+        emit("nginx -t" in instruction and "ls -l" in instruction,
+             "nginx-config: instruction teaches nginx -t and ls -l")
+        emit(fixture("getenforce.txt") in ("Permissive\n", "Disabled\n")
+             and fixture("ausearch_avc.txt") != NEUTRAL,
+             "nginx-config: optional SELinux context is present and benign")
+
+    if sid == "dns-mismatch":
+        correct_host = dumped[0]["answer"]
+        connection_fragment = dumped[1]["answer"]
+        checked_path = dumped[2]["path"]
+        fixed_text = dumped[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        url_match = re.search(r"endpoint_url=http://([^:]+):(\d+)(/v1)", initial_text)
+        wrong_host = url_match.group(1) if url_match else ""
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "dns-mismatch: two hash checks precede the file check")
+        emit(bool(wrong_host) and wrong_host != correct_host
+             and wrong_host in initial_text and correct_host not in initial_text
+             and fixed_text == initial_text.replace(wrong_host, correct_host),
+             "dns-mismatch: repair changes only the stale endpoint hostname")
+        emit(all(correct_host in fixture(name) and wrong_host in fixture(name)
+                 for name in ("dig.txt", "nslookup.txt")),
+             "dns-mismatch: DNS fixtures distinguish canonical and stale hosts")
+        emit("502" in fixture("curl_I.txt") and wrong_host in fixture("curl_I.txt"),
+             "dns-mismatch: curl -I shows 502 from the stale host")
+        emit(connection_fragment in fixture("curl_v.txt")
+             and connection_fragment in fixture("nc_zv.txt")
+             and "Connection refused" in fixture("nc_zv.txt"),
+             "dns-mismatch: transport fixtures share the checked connection fragment")
+        emit(wrong_host in fixture("ping.txt"),
+             "dns-mismatch: ping corroborates the stale host")
+        emit(all(fixture(name) != NEUTRAL for name in
+                 ("dig.txt", "nslookup.txt", "curl_I.txt", "curl_v.txt",
+                  "ping.txt", "nc_zv.txt")),
+             "dns-mismatch: all DNS and transport fixtures contain scenario data")
+        emit(all(command in instruction for command in
+                 ("dig", "nslookup", "curl -I", "curl -v", "ping", "nc -zv")),
+             "dns-mismatch: instruction teaches the DNS and transport checklist")
+
 last = stage_lines[-1] if stage_lines else None
 emit(last is not None and dump["final_flag"] == dump["stages"][last]["flag"],
      "final flag is the last stage flag")
@@ -586,13 +713,17 @@ PY
         fi
     }
 
-    run_generator_case "default four-template troubleshoot generation" default 4
+    run_generator_case "default six-template troubleshoot generation" default 6
     run_generator_case "original two-template PICK" pilot-pick 2 \
         svc-crashloop,k8s-crashloop
     # A reversed, non-pool order and a deliberately different SET prove PICK
     # controls both the exact subset order and the effective stage count.
     run_generator_case "new two-template PICK with reversed order" new-pick 1 \
         container-crash,disk-full
+    run_generator_case "wave-three two-template PICK" wave3-pick 1 \
+        nginx-config,dns-mismatch
+    run_generator_case "wave-three PICK in reversed order" wave3-reversed 6 \
+        dns-mismatch,nginx-config
 fi
 
 # ---------------------------------------------------------------- summary

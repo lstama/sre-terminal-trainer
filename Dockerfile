@@ -65,8 +65,12 @@ RUN extra=""; \
 FROM alpine:${ALPINE_VERSION} AS troubleshoot
 
 # Keep the terminal toolbox identical; the mocks shadow selected real tools.
+# The nginx service account owns generated reference assets so `ls -l` exposes
+# real service-user metadata to the nginx-config drill.
 RUN apk add --no-cache \
-        openssh bash tmux nano grep tree less coreutils diffutils gawk findutils shadow
+        openssh bash tmux nano grep tree less coreutils diffutils gawk findutils shadow \
+    && addgroup -S nginx \
+    && adduser -S -D -H -G nginx -s /sbin/nologin nginx
 
 # Explicit ordering is part of the fixture contract: /usr/local/bin mocks must
 # win over both BusyBox applets in /bin and package tools in /usr/bin.
@@ -104,6 +108,9 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/sremock \
  && find /var/lib/sre-trainer -type f -exec chmod 0600 {} + \
  && find /var/lib/sremock -type d -exec chmod 0755 {} + \
  && find /var/lib/sremock -type f -exec chmod 0644 {} + \
+ && if [ -d /etc/nginx/references ]; then \
+         find /etc/nginx/references -type f -exec chown nginx:nginx {} +; \
+     fi \
  && chown -R 1000:1000 /home/trainee \
  && ssh-keygen -A
 

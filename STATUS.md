@@ -22,10 +22,14 @@ included), with a real 8/8 solve under Podman.
 - T07: Docker/Podman engine abstraction in the `Makefile` (`ENGINE`, auto-detected), docs
   updated, Podman 6.2.0 installed rootless, and both engines verified live.
   Details: `.agent/reports/T07-podman.md`.
-- Day 2 (branch `feat/troubleshoot-pilot`): the `troubleshoot` profile — a two-stage pilot
-  (`svc-crashloop`, `k8s-crashloop`) with mocked `systemctl`/`journalctl`/`ss`/`kubectl`.
-  "Profile" is the `PROFILE=` mechanism; "pilot" is the two-stage content set.
+- Day 2: the `troubleshoot` profile has six templates (`svc-crashloop`,
+  `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`).
+  Diagnostic commands are mocked; nginx reference ownership is real image metadata.
   Details: `docs/troubleshooting.md`.
+- T26 (`feat/troubleshoot-wave3`): added `nginx-config` and `dns-mismatch`, expanded
+  the default troubleshoot pool to six, and extended docs/smoke/self-test coverage.
+  Docker verification includes a full two-stage SSH solve with both file repairs;
+  `make test` passes 111 verifier and 369 troubleshoot assertions.
 
 ## Fixes landed in T05
 

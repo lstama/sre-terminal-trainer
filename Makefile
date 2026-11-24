@@ -37,8 +37,8 @@ BUILD_PROFILE_ARGS :=
 endif
 
 PORT      ?= 2222
-# The troubleshoot pool has four templates; keep the terminal default at 8.
-SET       ?= $(if $(filter troubleshoot,$(PROFILE)),4,8)
+# The troubleshoot pool has six templates; keep the terminal default at 8.
+SET       ?= $(if $(filter troubleshoot,$(PROFILE)),6,8)
 SEED      ?=
 SSH_USER  ?= trainee
 
@@ -60,7 +60,7 @@ help:
 	  '  make up [SEED=1234] [SET=8] [PORT=2222]' \
 	  '                           build the image and start the container' \
 	  '  make up PROFILE=troubleshoot PICK=svc-crashloop,k8s-crashloop' \
-	  '                           build the mock-command pilot image and start it' \
+	  '                           build the mock-command troubleshoot image and start it' \
 	  '  make ssh                log in as the trainee (password prompt)' \
 	  '  make status             container, credentials, seed, stage and record status' \
 	  '  make down               save completion records, then remove the container' \
@@ -83,8 +83,8 @@ help:
 up:
 	@if [ '$(PROFILE)' = troubleshoot ]; then
 	  case '$(SET)' in
-	    1|2|3|4) ;;
-	    *) echo "error: PROFILE=troubleshoot supports SET=1..4 (pool of 4 templates); got $(SET)" >&2; exit 1 ;;
+	    1|2|3|4|5|6) ;;
+	    *) echo "error: PROFILE=troubleshoot supports SET=1..6 (pool of 6 templates); got $(SET)" >&2; exit 1 ;;
 	  esac
 	fi
 	@mkdir -p $(INSTANCE) $(STATE)

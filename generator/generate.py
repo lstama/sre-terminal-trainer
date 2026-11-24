@@ -850,6 +850,7 @@ NEUTRAL_FIXTURE = "no data for this scenario\n"
 # template; every run still emits all 30 fixtures above (unused = NEUTRAL).
 TROUBLESHOOT_IDS = [
     "svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
+    "nginx-config", "dns-mismatch",
 ]
 TROUBLESHOOT_TEMPLATES = {}
 
@@ -1465,6 +1466,251 @@ def t_container_crash(rng, fs, fixtures, soft):
     return instr, hints, checks
 
 
+@troubleshoot_template("nginx-config")
+def t_nginx_config(rng, fs, fixtures, soft):
+    """Web-server triage: parse the nginx error, inspect ownership metadata and
+    repair both the unterminated directive and the stale virtual-host name."""
+    site = tok(rng, "site", 6)
+    cfg = "/etc/nginx/conf.d/%s.conf" % site
+    reference = "/etc/nginx/references/%s.conf" % tok(rng, "ref", 8)
+    listen_port = rng.choice([80, 8080, 8443])
+    server_name = "web-%s.internal.example" % hexs(rng, 8)
+    wrong_server_name = "legacy-%s.internal.example" % hexs(rng, 8)
+
+    fixed_lines = [
+        "server {",
+        "    listen %d;" % listen_port,
+        "    server_name %s;" % server_name,
+        "    root /srv/www/%s;" % site,
+        "    access_log /var/log/nginx/%s.access.log;" % site,
+        "    location / {",
+        "        try_files $uri $uri/ =404;",
+        "    }",
+        "}",
+    ]
+    # Keep the server_name repair separate from the syntax repair so the brief
+    # can require exactly two changed lines on every seed.
+    bad_index = rng.choice([1, 3, 4, 6])
+    broken_lines = list(fixed_lines)
+    broken_lines[2] = fixed_lines[2].replace(server_name, wrong_server_name)
+    broken_lines[bad_index] = fixed_lines[bad_index][:-1]  # remove the semicolon
+    broken = "\n".join(broken_lines) + "\n"
+    fixed = "\n".join(fixed_lines) + "\n"
+    error_line = bad_index + 1
+    directive = fixed_lines[bad_index].strip().split()[0]
+    error_fragment = "nginx-L%d-%s" % (error_line, hexs(rng, 6))
+
+    # 0666 is intentional: /etc/nginx stays root-owned, but the trainee has no
+    # sudo and must still be able to repair this one checked file in place.
+    wfile(fs, cfg, broken, mode=0o666)
+    reference_text = "\n".join([
+        "# canonical nginx reference for the web service",
+        "server {",
+        "    listen 80;",
+        "    server_name %s;" % server_name,
+        "}",
+    ]) + "\n"
+    wfile(fs, reference, reference_text, mode=0o644)
+
+    put_fixture(fixtures, "nginx_t.txt", "\n".join([
+        'nginx: [emerg] directive "%s" is not terminated by ";" in %s:%d'
+        % (directive, cfg, error_line),
+        "nginx: [emerg] syntax-check-id=%s" % error_fragment,
+        "nginx: configuration file /etc/nginx/nginx.conf test failed",
+    ]) + "\n", "nginx-config")
+    # These are deliberately non-load-bearing: a permissive/disabled SELinux
+    # state and an empty AVC search provide realistic context, not the cause.
+    put_fixture(fixtures, "getenforce.txt", rng.choice(["Permissive", "Disabled"]) + "\n",
+                "nginx-config")
+    put_fixture(fixtures, "ausearch_avc.txt", "----\n<no matches>\n", "nginx-config")
+
+    # Load-bearing invariants: the reported line is the broken line, the correct
+    # virtual-host name is absent from the shipped config, and exactly two lines
+    # separate the broken and corrected byte strings.
+    changed = [i for i, (a, b) in enumerate(zip(broken_lines, fixed_lines)) if a != b]
+    if changed != sorted([bad_index, 2]):
+        raise AssertionError("nginx-config: expected exactly the syntax and server_name changes")
+    if wrong_server_name not in broken or server_name in broken:
+        raise AssertionError("nginx-config: stale/canonical server_name state inconsistent")
+    if server_name not in reference_text:
+        raise AssertionError("nginx-config: canonical server_name missing from reference")
+    if cfg not in fixtures["nginx_t.txt"] or (":%d" % error_line) not in fixtures["nginx_t.txt"]:
+        raise AssertionError("nginx-config: nginx -t does not report the shipped path and line")
+    if error_fragment not in fixtures["nginx_t.txt"]:
+        raise AssertionError("nginx-config: syntax diagnostic fragment missing")
+
+    checks = [
+        hash_check("nginx-config-1", error_fragment,
+                   "Submit the complete syntax-check token reported by `nginx -t`."),
+        hash_check("nginx-config-2", "nginx",
+                   "Submit the owner name shown by `ls -l` on the reference config."),
+        file_check("nginx-config-3", cfg, fixed, "nginx-" + site,
+                   "Repair %s in place: add the missing semicolon on the directive "
+                   "reported by `nginx -t` and replace only `server_name` with the "
+                   "canonical value from the reference config." % cfg,
+                   initial=broken),
+    ]
+    instr = (
+        "The nginx site at %s fails its configuration test. Start with `nginx -t`: it "
+        "names the unterminated directive, its line number and a syntax-check token. "
+        "Then run `ls -l %s` to identify the service account that owns the canonical "
+        "reference config, and read it with `cat` to recover the expected `server_name`.\n\n"
+        "The checked config is %s. Its corrected end state is byte-for-byte the shipped "
+        "file with exactly two changes: terminate the directive named by `nginx -t` with "
+        "a semicolon, and replace only the `server_name` value with the canonical value "
+        "from the reference config. Leave the port, root, log path, location block and "
+        "all other bytes unchanged."
+        % (cfg, reference, cfg)
+    )
+    hints = [
+        "Checklist: nginx -t is authoritative for the parse failure; copy its complete "
+        "syntax-check token. getenforce and ausearch -m avc are context only here.",
+        "Checklist: ls -l <reference-config> shows the owning service account in the "
+        "owner column; submit that owner name, not the group.",
+        "Checklist: cat <reference-config> exposes the canonical server_name. In nano, "
+        "add only the reported semicolon and replace only server_name; Ctrl+O writes "
+        "the checked file in place.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("dns-mismatch")
+def t_dns_mismatch(rng, fs, fixtures, soft):
+    """DNS/endpoint triage: the app bypasses its canonical service name and
+    points directly at a stale backend that returns a gateway failure."""
+    service = tok(rng, "api", 6)
+    correct_host = "%s.internal.example" % service
+    wrong_host = "stale-%s.edge.example" % hexs(rng, 8)
+    wrong_ip = ip(rng)
+    backend_port = rng.choice([8080, 8443, 9443])
+    connection_fragment = "conn-%s" % hexs(rng, 8)
+    response_fragment = "edge-%s" % hexs(rng, 6)
+    endpoint = "/home/trainee/app/endpoint.conf"
+
+    broken = "\n".join([
+        "# application endpoint (managed by ops)",
+        "endpoint_url=http://%s:%d/v1" % (wrong_host, backend_port),
+        "connect_timeout_ms=2500",
+        "retry_count=3",
+    ]) + "\n"
+    fixed = broken.replace(wrong_host, correct_host)
+    wfile(fs, endpoint, broken, mode=0o644)
+
+    # The canonical service hostname is the DNS owner/query name.  Its current
+    # CNAME target is the stale backend hard-coded into the app config.
+    put_fixture(fixtures, "dig.txt", "\n".join([
+        "; <<>> DiG 9.18.1 <<>> %s A" % correct_host,
+        ";; global options: +cmd",
+        ";; Got answer:",
+        ";; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: %s" % hexs(rng, 4),
+        ";; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1",
+        "",
+        ";; QUESTION SECTION:",
+        ";%s. IN A" % correct_host,
+        "",
+        ";; ANSWER SECTION:",
+        "%s. 60 IN CNAME %s." % (correct_host, wrong_host),
+        "%s. 60 IN A %s" % (wrong_host, wrong_ip),
+        "",
+        ";; Query time: 3 msec",
+        ";; SERVER: 10.0.0.53#53(10.0.0.53)",
+        ";; WHEN: %s" % ts(rng),
+        ";; MSG SIZE  rcvd: %d" % rng.randint(80, 140),
+    ]) + "\n", "dns-mismatch")
+    put_fixture(fixtures, "nslookup.txt", "\n".join([
+        "Server:        10.0.0.53",
+        "Address:       10.0.0.53#53",
+        "",
+        "Non-authoritative answer:",
+        "%s canonical name = %s." % (correct_host, wrong_host),
+        "Name:   %s" % wrong_host,
+        "Address: %s" % wrong_ip,
+    ]) + "\n", "dns-mismatch")
+    put_fixture(fixtures, "curl_I.txt", "\n".join([
+        "HTTP/1.1 502 Bad Gateway",
+        "Server: %s" % response_fragment,
+        "Date: %s" % ts(rng),
+        "X-Backend-Host: %s" % wrong_host,
+        "X-Upstream: %s:%d" % (wrong_ip, backend_port),
+        "Content-Length: 0",
+        "Connection: keep-alive",
+    ]) + "\n", "dns-mismatch")
+    put_fixture(fixtures, "curl_v.txt", "\n".join([
+        "*   Trying %s:%d..." % (wrong_ip, backend_port),
+        "* connect to %s (%s) port %d failed: Connection refused"
+        % (wrong_host, wrong_ip, backend_port),
+        "* connection %s: refused" % connection_fragment,
+        "* Closing connection 0",
+    ]) + "\n", "dns-mismatch")
+    put_fixture(fixtures, "ping.txt", "\n".join([
+        "PING %s (%s) 56(84) bytes of data." % (wrong_host, wrong_ip),
+        "64 bytes from %s (%s): icmp_seq=1 ttl=62 time=2.4 ms"
+        % (wrong_host, wrong_ip),
+        "64 bytes from %s (%s): icmp_seq=2 ttl=62 time=2.1 ms"
+        % (wrong_host, wrong_ip),
+        "",
+        "--- %s ping statistics ---" % wrong_host,
+        "2 packets transmitted, 2 received, 0%% packet loss, time 1001ms",
+    ]) + "\n", "dns-mismatch")
+    put_fixture(fixtures, "nc_zv.txt", "\n".join([
+        "nc: connect to %s (%s) port %d (tcp) failed: Connection refused"
+        % (wrong_host, wrong_ip, backend_port),
+        "connection %s: refused" % connection_fragment,
+    ]) + "\n", "dns-mismatch")
+
+    if correct_host == wrong_host or wrong_host not in broken or correct_host in broken:
+        raise AssertionError("dns-mismatch: canonical/stale endpoint state inconsistent")
+    if fixed != broken.replace(wrong_host, correct_host) or fixed == broken:
+        raise AssertionError("dns-mismatch: endpoint repair is not a hostname-only change")
+    for name in ("dig.txt", "nslookup.txt"):
+        if correct_host not in fixtures[name] or wrong_host not in fixtures[name]:
+            raise AssertionError("dns-mismatch: %s lacks canonical/stale host evidence" % name)
+    if "502" not in fixtures["curl_I.txt"] or wrong_host not in fixtures["curl_I.txt"]:
+        raise AssertionError("dns-mismatch: curl -I lacks the stale-host gateway failure")
+    if connection_fragment not in fixtures["curl_v.txt"]:
+        raise AssertionError("dns-mismatch: curl -v connection fragment missing")
+    if "Connection refused" not in fixtures["nc_zv.txt"] \
+            or connection_fragment not in fixtures["nc_zv.txt"]:
+        raise AssertionError("dns-mismatch: nc evidence/fragment inconsistent")
+    if wrong_ip not in fixtures["ping.txt"]:
+        raise AssertionError("dns-mismatch: ping does not corroborate the stale address")
+
+    checks = [
+        hash_check("dns-mismatch-1", correct_host,
+                   "Submit the canonical service hostname shown as the DNS query/answer "
+                   "owner, not the stale CNAME target."),
+        hash_check("dns-mismatch-2", connection_fragment,
+                   "Submit the connection diagnostic token printed by `curl -v` or "
+                   "`nc -zv`."),
+        file_check("dns-mismatch-3", endpoint, fixed, "dns-" + service,
+                   "Repair %s in place: replace only the hostname in `endpoint_url` with "
+                   "the canonical service hostname from the DNS evidence." % endpoint,
+                   initial=broken),
+    ]
+    instr = (
+        "The application endpoint at %s is returning 502. Triage name resolution and "
+        "transport with `dig <name> A`, `nslookup <name>`, `curl -I <url>`, "
+        "`curl -v <url>`, `ping <host>` and `nc -zv <host> <port>`. Distinguish the "
+        "canonical service hostname shown as the DNS query/answer owner from the stale "
+        "CNAME/backend it currently reaches; the transport fixtures explain the gateway "
+        "failure and refused backend port.\n\n"
+        "The checked config is %s. Its corrected end state is byte-for-byte the shipped "
+        "file with exactly one change: the hostname inside `endpoint_url` becomes the "
+        "canonical service hostname from the DNS evidence. Preserve the scheme, port, "
+        "path, timeout and retry lines exactly."
+        % (endpoint, endpoint)
+    )
+    hints = [
+        "Checklist: dig and nslookup show the queried service name separately from its "
+        "current CNAME target; the service name, not that stale target, is the endpoint.",
+        "Checklist: curl -I shows the 502; curl -v and nc -zv print a connection "
+        "diagnostic token and corroborate the refused backend port.",
+        "Checklist: edit only the endpoint_url hostname in place with nano; keep the "
+        "scheme, port, path, timeout and retry lines byte-for-byte unchanged.",
+    ]
+    return instr, hints, checks
+
+
 # ---------------------------------------------------------------------------
 # output assembly
 # ---------------------------------------------------------------------------
@@ -1609,7 +1855,7 @@ def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
 # ---------------------------------------------------------------------------
 
 def self_test(seeds, verbose=True):
-    """Generate a full 16-stage terminal set *and* the 4-stage troubleshoot set
+    """Generate a full 16-stage terminal set *and* the 6-stage troubleshoot set
     per seed, then cross-foot every answer against the artefacts on disk.
 
     The templates assert their own load-bearing invariants while generating (e.g.
@@ -1618,7 +1864,7 @@ def self_test(seeds, verbose=True):
     order, file checks not shipped pre-solved, no answer dump under ``fs/``, the
     two drill-specific claims (top talker, config-drift baseline token), and for
     troubleshoot: the full 30-fixture contract, broken initial files, and the
-    df/du and docker-ps clue placement for the two new drills.
+    scenario-specific clue placement for the four added troubleshoot drills.
     """
     import re
     import tempfile
@@ -1741,7 +1987,7 @@ def self_test(seeds, verbose=True):
                 check("answers.json" not in filenames,
                       "seed %d: answers.json leaked into %s" % (seed, dirpath))
 
-            # ---- troubleshoot profile: all four templates, all 30 fixtures ----
+            # ---- troubleshoot profile: all six templates, all 30 fixtures ----
             with tempfile.TemporaryDirectory(prefix="sre-selftest-ts.") as ts_tmp:
                 ts_dump_path = os.path.join(ts_tmp, "answers.json")
                 ts_stages, ts_order, ts_final = write_outputs(
@@ -1845,6 +2091,71 @@ def self_test(seeds, verbose=True):
                     check(cname and cname in ps and ("Exited (%s)" % cexit) in ps,
                           "seed %d: container name/exit not in docker ps" % seed)
                     check(ans[1] in logs, "seed %d: missing var not in logs" % seed)
+                if "nginx-config" in ts_order:
+                    with open(os.path.join(ts_fixtures, "nginx_t.txt"),
+                              encoding="utf-8") as fh:
+                        nginx_test = fh.read()
+                    nginx_checks = ts_dump["stages"]["nginx-config"]["checks"]
+                    ans = [c["answer"] for c in nginx_checks]
+                    nginx_cfg = os.path.join(ts_fs, nginx_checks[2]["path"].lstrip("/"))
+                    with open(nginx_cfg, "rb") as fh:
+                        initial_bytes = fh.read()
+                    initial = initial_bytes.decode("utf-8")
+                    fixed = ans[2]
+                    changed = [(a, b) for a, b in zip(initial.splitlines(), fixed.splitlines())
+                               if a != b]
+                    check(ans[0] in nginx_test and nginx_checks[2]["path"] in nginx_test,
+                          "seed %d: nginx error fragment/path missing from nginx -t" % seed)
+                    check(len(initial.splitlines()) == len(fixed.splitlines())
+                          and len(changed) == 2
+                          and sum(a + ";" == b for a, b in changed) == 1
+                          and sum(a.strip().startswith("server_name ")
+                                  and b.strip().startswith("server_name ")
+                                  for a, b in changed) == 1,
+                          "seed %d: nginx repair is not exactly semicolon + server_name" % seed)
+                    nginx_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                            % ts_dump["stages"]["nginx-config"]["index"])
+                    with open(os.path.join(nginx_sd, "instruction"), encoding="utf-8") as fh:
+                        nginx_instr = fh.read()
+                    ref_match = re.search(r"(/etc/nginx/references/[^\s`]+\.conf)", nginx_instr)
+                    check(ref_match is not None,
+                          "seed %d: nginx instruction lacks reference path" % seed)
+                    if ref_match:
+                        with open(os.path.join(ts_fs, ref_match.group(1).lstrip("/")),
+                                  encoding="utf-8") as fh:
+                            reference = fh.read()
+                        server_line = next((line.strip() for line in fixed.splitlines()
+                                            if line.strip().startswith("server_name ")), "")
+                        check(server_line in reference,
+                              "seed %d: nginx reference lacks corrected server_name" % seed)
+                    check(ans[1] == "nginx",
+                          "seed %d: nginx owner answer is not the service user" % seed)
+                if "dns-mismatch" in ts_order:
+                    with open(os.path.join(ts_fixtures, "dig.txt"), encoding="utf-8") as fh:
+                        dig = fh.read()
+                    with open(os.path.join(ts_fixtures, "nslookup.txt"), encoding="utf-8") as fh:
+                        nslookup = fh.read()
+                    with open(os.path.join(ts_fixtures, "curl_v.txt"), encoding="utf-8") as fh:
+                        curl_v = fh.read()
+                    with open(os.path.join(ts_fixtures, "nc_zv.txt"), encoding="utf-8") as fh:
+                        nc = fh.read()
+                    dns_checks = ts_dump["stages"]["dns-mismatch"]["checks"]
+                    ans = [c["answer"] for c in dns_checks]
+                    dns_cfg = os.path.join(ts_fs, dns_checks[2]["path"].lstrip("/"))
+                    with open(dns_cfg, encoding="utf-8") as fh:
+                        broken_endpoint = fh.read()
+                    wrong_host = re.search(r"endpoint_url=http://([^:]+):", broken_endpoint)
+                    check(wrong_host is not None and wrong_host.group(1) != ans[0]
+                          and ans[0] not in broken_endpoint
+                          and ans[2] == broken_endpoint.replace(wrong_host.group(1), ans[0]),
+                          "seed %d: DNS endpoint repair is not hostname-only" % seed)
+                    check(ans[0] in dig and ans[0] in nslookup,
+                          "seed %d: canonical DNS hostname missing from answers" % seed)
+                    if wrong_host:
+                        check(wrong_host.group(1) in dig and wrong_host.group(1) in nslookup,
+                              "seed %d: stale DNS target missing from answers" % seed)
+                    check(ans[1] in curl_v and ans[1] in nc and "Connection refused" in nc,
+                          "seed %d: DNS transport fragment/refusal missing" % seed)
 
                 if verbose:
                     print("selftest seed %d: troubleshoot %d stages + %d fixtures checked"

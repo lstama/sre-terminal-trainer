@@ -1,6 +1,6 @@
 # Day 2: the troubleshoot profile
 
-The trainer's second profile is a pool of four diagnostic drills whose terminal
+The trainer's second profile is a pool of six diagnostic drills whose terminal
 commands are answered from fixtures instead of a live machine. It exists to
 practise the read-then-repair loop — inspect the evidence, decide on one change,
 make it, prove it — without shipping a privileged container, a systemd host or a
@@ -12,11 +12,12 @@ progress and the same flag, timing and record flow. If you have used the default
 profile, the interaction is identical; only the stages differ.
 
 - Profile flag: `PROFILE=troubleshoot`
-- Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`
+- Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`,
+  `nginx-config`, `dns-mismatch`
 - Image / container: `sre-terminal-trainer-troubleshoot:local` / `sre-trainer-troubleshoot`
   (separate from the default names, so both profiles can run side by side)
 
-## The four templates
+## The six templates
 
 Each stage's brief names the exact files and check ids. The checklists below are
 the commands the stage is built around; the facts they expose are randomized per
@@ -94,6 +95,42 @@ the logs; one file check repairs the environment file. Derive the variable from
 the evidence rather than guessing it, then make the brief's exact in-place
 change.
 
+### `nginx-config`
+
+An nginx virtual host does not pass its configuration test. Correlate the parse
+error with real file metadata and a canonical reference asset:
+
+| Command | What it is for |
+|---|---|
+| `nginx -t` | The unterminated directive, source path, line number and diagnostic token |
+| `ls -l <reference-config>` | The service account that owns the reference asset |
+| `cat <reference-config>` | The canonical `server_name` for the virtual host |
+| `getenforce` / `ausearch -m avc` | Benign SELinux context; not the load-bearing failure |
+
+Two hash checks use the syntax diagnostic and the owner name. The file check
+repairs the shipped site config in place: terminate the reported directive and
+replace only `server_name` with the reference value. The reference asset is owned
+by the service account in the image, so its owner is real metadata rather than
+text invented by a mock.
+
+### `dns-mismatch`
+
+An application endpoint returns a gateway failure after its hostname stops
+matching the intended service. Separate the canonical service name from the
+stale backend currently reached through DNS:
+
+| Command | What it is for |
+|---|---|
+| `dig <name> A` / `nslookup <name>` | The queried service name and its current CNAME target |
+| `curl -I <url>` | The gateway response from the stale backend |
+| `curl -v <url>` | Connection details and the transport diagnostic token |
+| `ping <host>` | Name/address reachability for context |
+| `nc -zv <host> <port>` | The refused backend port and matching connection diagnostic |
+
+Two hash checks use the canonical service hostname and the connection token. The
+file check changes only the hostname in `/home/trainee/app/endpoint.conf`; the
+scheme, port, path and every other line must stay byte-for-byte unchanged.
+
 ## How the mocks work
 
 Orchestration detail, not something a trainee needs to act on.
@@ -136,7 +173,7 @@ Orchestration detail, not something a trainee needs to act on.
 ## Running it
 
 ```sh
-make up PROFILE=troubleshoot                         # seeded selection of all four
+make up PROFILE=troubleshoot                         # seeded selection of all six
 # Or choose an exact, ordered subset:
 make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
@@ -145,9 +182,9 @@ make ssh
 - `PICK` names any non-empty subset and its exact order for this build
   (`--pick` in the generator). With `PICK` set, `SET` does not decide the count;
   the picked list does.
-- With no `PICK`, this profile defaults to `SET=4`, selecting all four templates
-  in seeded order. `SET=1`, `2` or `3` selects that many from the pool; values
-  outside 1–4 are rejected before the build. The terminal profile keeps its
+- With no `PICK`, this profile defaults to `SET=6`, selecting all six templates
+  in seeded order. `SET=1` through `5` selects that many from the pool; values
+  outside 1–6 are rejected before the build. The terminal profile keeps its
   default `SET=8`.
 - `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
   corpus; the generator layer is keyed on the build arguments, so an unchanged
@@ -216,8 +253,8 @@ A stage is solved when `verify stage` prints its flag — not when the service
   implemented. Anything else — `systemctl restart`, `kubectl apply`,
   `docker run`, `ss -tulpn` — fails on purpose. A mock that guesses would teach
   the wrong reflex.
-- **No real systemd, kubelet, API server or container runtime.** The image does
-  not install them; `docker` and `podman` are mocks too, not engines.
+- **No real systemd, kubelet, API server, web server or container runtime.** The
+  image does not install them; `nginx`, `docker` and `podman` are mocks too.
 - **No network.** The drills need none, and the image is built without it at run
   time.
 - **Repairs are verified by hash, not by behaviour.** You cannot "fix" the
@@ -227,7 +264,7 @@ A stage is solved when `verify stage` prints its flag — not when the service
 - **Throwaway container.** Your edits live inside the container. `make down`
   removes it, so unrecorded work is gone; the completion record is the only
   thing that persists.
-- **Fixed pool.** There are four templates. Fixtures for commands the picked
+- **Fixed pool.** There are six templates. Fixtures for commands the picked
   stages do not use are still shipped, but they print a neutral placeholder
   instead of scenario data.
 
