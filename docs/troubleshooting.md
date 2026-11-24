@@ -1,6 +1,6 @@
-# Day 2: the troubleshoot profile (two-stage pilot)
+# Day 2: the troubleshoot profile
 
-The trainer's second profile is a small set of diagnostic drills whose terminal
+The trainer's second profile is a pool of four diagnostic drills whose terminal
 commands are answered from fixtures instead of a live machine. It exists to
 practise the read-then-repair loop — inspect the evidence, decide on one change,
 make it, prove it — without shipping a privileged container, a systemd host or a
@@ -12,11 +12,11 @@ progress and the same flag, timing and record flow. If you have used the default
 profile, the interaction is identical; only the stages differ.
 
 - Profile flag: `PROFILE=troubleshoot`
-- Pilot stages: `svc-crashloop` and `k8s-crashloop`
+- Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`
 - Image / container: `sre-terminal-trainer-troubleshoot:local` / `sre-trainer-troubleshoot`
   (separate from the default names, so both profiles can run side by side)
 
-## The two pilot stages
+## The four templates
 
 Each stage's brief names the exact files and check ids. The checklists below are
 the commands the stage is built around; the facts they expose are randomized per
@@ -62,6 +62,38 @@ on the deployment manifest under `/home/trainee/k8s/`. The brief states the
 exact one-line change it expects, and the value for that line comes from the
 ConfigMap and event output.
 
+### `disk-full`
+
+A host has run out of disk space. Correlate filesystem, directory and load
+evidence before making the repair:
+
+| Command | What it is for |
+|---|---|
+| `df -h` | Filesystems and their use percentage, including the full mount |
+| `du -sh /var/log/* \| sort -h` | Log directories ordered by size; the largest is the runaway directory |
+| `free -m` / `top` | Memory and CPU pressure for context |
+
+Two hash checks use facts from `df` and `du`; one file check repairs the
+logrotate policy. The brief specifies the byte-exact change. Inspect the shipped
+configuration before editing it in place.
+
+### `container-crash`
+
+A container exits immediately because required environment configuration is
+missing. Both the **Docker and Podman mocks** are exercised, each with its own
+process, log and inspection fixtures:
+
+| Command | What it is for |
+|---|---|
+| `docker ps -a` / `podman ps -a` | Container name and exited status |
+| `docker logs <name>` / `podman logs <name>` | Fatal error naming the missing environment variable |
+| `docker inspect <name>` / `podman inspect <name>` | Exit code and the environment actually configured |
+
+Two hash checks use the container state and the missing variable reported by
+the logs; one file check repairs the environment file. Derive the variable from
+the evidence rather than guessing it, then make the brief's exact in-place
+change.
+
 ## How the mocks work
 
 Orchestration detail, not something a trainee needs to act on.
@@ -104,17 +136,19 @@ Orchestration detail, not something a trainee needs to act on.
 ## Running it
 
 ```sh
-make up PROFILE=troubleshoot PICK=svc-crashloop,k8s-crashloop
+make up PROFILE=troubleshoot                         # seeded selection of all four
+# Or choose an exact, ordered subset:
+make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
 ```
 
-- `PICK` names the exact stages and their order for this build (`--pick` in the
-  generator). With `PICK` set, `SET` does not decide the count; the picked list
-  does.
-- With no `PICK`, this profile defaults to `SET=2`, selecting both pilot
-  templates in seeded order. `SET=1` selects one; any other value is rejected
-  before the build because the pilot supports only 1–2 stages. The terminal
-  profile keeps its default `SET=8`.
+- `PICK` names any non-empty subset and its exact order for this build
+  (`--pick` in the generator). With `PICK` set, `SET` does not decide the count;
+  the picked list does.
+- With no `PICK`, this profile defaults to `SET=4`, selecting all four templates
+  in seeded order. `SET=1`, `2` or `3` selects that many from the pool; values
+  outside 1–4 are rejected before the build. The terminal profile keeps its
+  default `SET=8`.
 - `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
   corpus; the generator layer is keyed on the build arguments, so an unchanged
   `SEED` and `PICK` reuse the cached layer.
@@ -127,7 +161,7 @@ The generated corpus is deterministic for a given `SEED` **and** `PICK`.
 
 ```sh
 make down
-make up PROFILE=troubleshoot PICK=svc-crashloop,k8s-crashloop SEED=1234
+make up PROFILE=troubleshoot PICK=disk-full,container-crash SEED=1234
 ```
 
 - `make up` records the seed in `.instance/seed` and reuses it until you pass a
@@ -152,7 +186,7 @@ verify hint 9      # show everything for the stage
 verify status      # stage, elapsed time, checks done
 ```
 
-## Knowing when the pilot is solved
+## Knowing when the profile is solved
 
 The flow is the default profile's flow, per stage:
 
@@ -193,13 +227,13 @@ A stage is solved when `verify stage` prints its flag — not when the service
 - **Throwaway container.** Your edits live inside the container. `make down`
   removes it, so unrecorded work is gone; the completion record is the only
   thing that persists.
-- **Fixed pool.** There are two pilot templates. Fixtures for commands the
-  picked stages do not use are still shipped, but they print a neutral
-  placeholder instead of scenario data.
+- **Fixed pool.** There are four templates. Fixtures for commands the picked
+  stages do not use are still shipped, but they print a neutral placeholder
+  instead of scenario data.
 
 ## Extending the pool later
 
-The pilot is designed so a new scenario is additive:
+The pool is designed so a new scenario is additive:
 
 1. **Template** — in `generator/generate.py`, add a
    `@troubleshoot_template("<id>")` function that returns
@@ -208,9 +242,10 @@ The pilot is designed so a new scenario is additive:
    fragment, hint, initial=broken)` for in-place repairs; `initial=` makes the
    generator refuse a check that already ships solved.
 2. **Fixtures** — emit evidence with `put_fixture(fixtures, name, content,
-   tid)`. Every name in `FIXTURE_NAMES` is written for every build, so names
-   shared with another template must produce identical bytes or generation
-   fails loudly; unused names fall back to the neutral placeholder.
+   tid)`. Every name in `FIXTURE_NAMES` is written for every build. Conflicting
+   hard claims fail loudly; a template that can yield a shared fixture uses
+   `put_soft`, and a hard claim always wins. Unused names fall back to the
+   neutral placeholder.
 3. **New command or new argument form** — add the dispatch arm in
    `src/sremock.c` (fixture names stay compile-time constants), add the symlink
    in the `troubleshoot` stage of the `Dockerfile` for a brand-new command

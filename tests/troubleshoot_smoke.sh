@@ -1,17 +1,17 @@
 #!/bin/sh
-# tests/troubleshoot_smoke.sh - smoke test for the troubleshoot pilot.
+# tests/troubleshoot_smoke.sh - smoke test for the troubleshoot profile.
 #
 # Part 1 (always runs): compile src/sremock.c statically, install it in a temp
 # PATH under the command names it mocks, point SREMOCK_ROOT at a temp fixture
 # directory, and assert the exact fixture bytes for systemctl, journalctl,
-# kubectl and docker - plus the rejection paths and byte-for-byte passthrough.
+# kubectl, docker, podman and the resource-triage commands - plus the rejection
+# paths and byte-for-byte passthrough.
 #
-# Part 2 (runs when the generator has --profile support): generate the two
-# pilot stages with `--profile troubleshoot --pick svc-crashloop,k8s-crashloop`
-# and assert the fixture contract, the manifest, the checks.tsv shape, that
-# each stage's flag recomputes from its fragments, and that no file check ships
-# already solved. If the generator has no troubleshoot profile yet, part 2 is
-# reported as pending (a SKIP, not a failure).
+# Part 2 (runs when the generator has --profile support): generate the default
+# four-template pool and ordered PICK subsets, then assert the fixture contract,
+# manifests, checks.tsv shape, stage/final flag recomputation, generated scenario
+# clues and that no file check ships already solved. If the generator has no
+# troubleshoot profile yet, part 2 is reported as pending (a SKIP, not a failure).
 #
 # Nothing here touches the network, real credentials, systemd or a cluster;
 # every artefact lives under one mktemp directory that is removed on exit.
@@ -183,6 +183,14 @@ CONTAINER ID  IMAGE       STATUS                     NAMES
 cccc2222dddd  demo:1.0    Exited (1) 2 minutes ago   demo
 EOF
 
+cat >"$FIX/podman_logs.txt" <<'EOF'
+api: FATAL: startup aborted
+EOF
+
+cat >"$FIX/podman_inspect.txt" <<'EOF'
+[{"Name":"demo","State":{"ExitCode":1,"Status":"exited"}}]
+EOF
+
 # CRLF and no trailing newline: proves the bytes are copied, not re-printed.
 printf 'State   Recv-Q  Send-Q  Local Address:Port\r\nLISTEN  0       128     0.0.0.0:8080' \
     >"$FIX/ss_tlnp.txt"
@@ -190,6 +198,29 @@ printf 'State   Recv-Q  Send-Q  Local Address:Port\r\nLISTEN  0       128     0.
 cat >"$FIX/ps_aux.txt" <<'EOF'
 USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
 demo      4242  0.0  0.1   1000   100 ?        S    10:00   0:00 demo-agent
+EOF
+
+cat >"$FIX/df_h.txt" <<'EOF'
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vda1        40G   18G   20G  48% /
+/dev/vdb1        60G   60G     0 100% /var/log
+EOF
+
+cat >"$FIX/du_sh.txt" <<'EOF'
+8.0K	/var/log/private
+420M	/var/log/syslog
+52G	/var/log/demo
+EOF
+
+cat >"$FIX/free_m.txt" <<'EOF'
+               total        used        free      shared  buff/cache   available
+Mem:           16000        4000        3000          80        9000       11500
+Swap:           4096         512        3584
+EOF
+
+cat >"$FIX/top.txt" <<'EOF'
+top - 10:00:00 up 12 days,  3:14,  1 user,  load average: 0.10, 0.20, 0.30
+Tasks: 128 total,   1 running, 127 sleeping,   0 stopped,   0 zombie
 EOF
 
 cat >"$FIX/nginx_t.txt" <<'EOF'
@@ -254,15 +285,27 @@ expect_fixture "docker ps -a -> docker_ps_a.txt" docker_ps_a.txt docker ps -a
 expect_fixture "docker logs NAME -> docker_logs.txt" docker_logs.txt docker logs demo
 expect_fixture "docker inspect NAME -> docker_inspect.txt" docker_inspect.txt docker inspect demo
 expect_fixture "podman ps -a -> podman_ps_a.txt" podman_ps_a.txt podman ps -a
+expect_fixture "podman logs NAME -> podman_logs.txt" podman_logs.txt podman logs demo
+expect_fixture "podman inspect NAME -> podman_inspect.txt" podman_inspect.txt podman inspect demo
 expect_reject "docker ps without -a is rejected" 'unsupported invocation' docker ps
 expect_reject "docker run is not implemented" 'unsupported invocation' docker run demo
+expect_reject "podman ps without -a is rejected" 'unsupported invocation' podman ps
+expect_reject "podman run is not implemented" 'unsupported invocation' podman run demo
 
 printf '\n== other mock commands ==\n'
 expect_fixture "ss -tlnp keeps CRLF and the missing final newline" ss_tlnp.txt ss -tlnp
 expect_fixture "ps aux -> ps_aux.txt" ps_aux.txt ps aux
+expect_fixture "df -h -> df_h.txt" df_h.txt df -h
+expect_fixture "du -sh DIR -> du_sh.txt" du_sh.txt du -sh /var/log/demo
+expect_fixture "free -m -> free_m.txt" free_m.txt free -m
+expect_fixture "top -> top.txt" top.txt top
 expect_fixture "nginx -t -> nginx_t.txt" nginx_t.txt nginx -t
 expect_fixture "dig takes its single fixture for any query" dig.txt dig example.test A
 expect_reject "ss without -tlnp is rejected" 'unsupported invocation' ss -tulpn
+expect_reject "df without -h is rejected" 'unsupported invocation' df
+expect_reject "du without -sh is rejected" 'unsupported invocation' du -s /var/log/demo
+expect_reject "free without -m is rejected" 'unsupported invocation' free -h
+expect_reject "top with arguments is rejected" 'unsupported invocation' top -b
 expect_reject "nginx without -t is rejected" 'unsupported invocation' nginx -s reload
 
 printf '\n== failure paths ==\n'
@@ -285,21 +328,13 @@ elif [ ! -f "$GEN" ]; then
 elif ! python3 "$GEN" --help 2>/dev/null | grep -q -- '--profile'; then
     skip_ "generator has no --profile support yet (pending T17 integration)"
 else
-    GEN_OUT=$WORK/gen
-    GEN_ANSWERS=$WORK/answers.json
-    # --set is still required by the CLI; --pick overrides the count and order.
-    if python3 "$GEN" --seed "$SEED" --set 2 --profile troubleshoot \
-            --pick svc-crashloop,k8s-crashloop \
-            --out "$GEN_OUT" --dump-answers "$GEN_ANSWERS" >"$WORK/gen.log" 2>&1; then
-        ok "generator --profile troubleshoot --pick ran (seed=$SEED)"
-        fail_before=$fail
-        python3 - "$GEN_OUT" "$GEN_ANSWERS" >"$WORK/gencheck.log" 2>&1 <<'PY'
+    cat >"$WORK/gencheck.py" <<'PY'
 import hashlib
 import json
 import os
 import sys
 
-out, answers_path = sys.argv[1], sys.argv[2]
+out, answers_path, pick_arg = sys.argv[1], sys.argv[2], sys.argv[3]
 failures = 0
 
 
@@ -320,6 +355,11 @@ def sha_bytes(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def fixture(name):
+    with open(os.path.join(out, "fixtures", name), encoding="utf-8") as fh:
+        return fh.read()
+
+
 # The T16 fixture contract: every name is always emitted, flat, nothing else.
 FIXTURES = [
     "systemctl_status.txt", "journalctl_unit.txt", "journalctl_xe.txt",
@@ -331,7 +371,10 @@ FIXTURES = [
     "kubectl_get_pods.txt", "kubectl_describe_pod.txt", "kubectl_logs.txt",
     "kubectl_get_events.txt", "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
 ]
-PICK = ["svc-crashloop", "k8s-crashloop"]
+POOL = ["svc-crashloop", "k8s-crashloop", "disk-full", "container-crash"]
+NEUTRAL = "no data for this scenario\n"
+PICK = pick_arg.split(",") if pick_arg else None
+expected_count = len(PICK) if PICK else len(POOL)
 
 fixtures_dir = os.path.join(out, "fixtures")
 present = sorted(os.listdir(fixtures_dir)) if os.path.isdir(fixtures_dir) else []
@@ -347,19 +390,33 @@ with open(answers_path, encoding="utf-8") as fh:
 with open(os.path.join(out, "manifest"), encoding="utf-8") as fh:
     manifest = fh.read().splitlines()
 
-emit(manifest[:2] == ["SEED " + str(dump["seed"]), "STAGES 2"],
-     "manifest header has SEED and STAGES 2", repr(manifest[:2]))
-emit(len(manifest) == 4, "manifest is exactly the 2-line header plus 2 stages",
+emit(manifest[:2] == ["SEED " + str(dump["seed"]), "STAGES %d" % expected_count],
+     "manifest header has SEED and STAGES %d" % expected_count, repr(manifest[:2]))
+emit(len(manifest) == 2 + expected_count,
+     "manifest is exactly the 2-line header plus %d stages" % expected_count,
      repr(manifest))
 stage_lines = [line[len("STAGE "):] for line in manifest if line.startswith("STAGE ")]
-emit(stage_lines == PICK, "manifest has exactly 2 STAGE lines in the picked order",
-     repr(stage_lines))
-emit(dump.get("order") == PICK, "answers dump order matches the picked order",
-     repr(dump.get("order")))
-emit(dump.get("set") == 2, "answers dump set size is 2", repr(dump.get("set")))
+if PICK:
+    emit(stage_lines == PICK, "manifest has the picked stages in exact order", repr(stage_lines))
+    emit(dump.get("order") == PICK, "answers dump order matches the picked order",
+         repr(dump.get("order")))
+else:
+    emit(len(stage_lines) == len(POOL) and len(set(stage_lines)) == len(POOL)
+         and set(stage_lines) == set(POOL),
+         "default generation selects each of the four templates exactly once",
+         repr(stage_lines))
+    emit(dump.get("order") == stage_lines,
+         "answers dump order matches the default manifest order", repr(dump.get("order")))
+emit(dump.get("set") == expected_count, "answers dump set size is %d" % expected_count,
+     repr(dump.get("set")))
+emit(set(dump.get("stages", {})) == set(stage_lines),
+     "answers dump contains exactly the selected stages", repr(sorted(dump.get("stages", {}))))
 
-for index, sid in enumerate(PICK, 1):
+for index, sid in enumerate(stage_lines, 1):
     sd = os.path.join(out, "stages", "%02d" % index)
+    if sid not in dump.get("stages", {}):
+        emit(False, "%s: stage exists in the answers dump" % sid)
+        continue
 
     with open(os.path.join(sd, "checks.tsv"), encoding="utf-8") as fh:
         blocks = [b for b in fh.read().split("\n\n") if b.strip()]
@@ -378,6 +435,10 @@ for index, sid in enumerate(PICK, 1):
     emit(all(c.get("id") and c.get("type") in ("hash", "file") and c.get("fragment")
              for c in checks),
          "%s: every check has id, type and fragment" % sid)
+    with open(os.path.join(sd, "instruction"), encoding="utf-8") as fh:
+        instruction = fh.read()
+    emit(all(c.get("id") in instruction for c in checks),
+         "%s: instruction names every check id" % sid)
 
     dumped = dump["stages"][sid]["checks"]
     emit([c.get("id") for c in checks] == [d.get("id") for d in dumped],
@@ -406,7 +467,8 @@ for index, sid in enumerate(PICK, 1):
         shipped = os.path.join(out, "fs", check["path"].lstrip("/"))
         emit(os.path.isfile(shipped), "%s/%s: the checked file is shipped"
              % (sid, check["id"]), shipped)
-        initial = sha_bytes(open(shipped, "rb").read())
+        with open(shipped, "rb") as fh:
+            initial = sha_bytes(fh.read())
         emit(initial != check["sha256"],
              "%s/%s: initial file differs from the expected repaired hash"
              % (sid, check["id"]), initial)
@@ -416,8 +478,48 @@ for index, sid in enumerate(PICK, 1):
              "%s/%s: dump repaired content hashes to the checked sha256"
              % (sid, check["id"]))
 
-last = PICK[-1]
-emit(dump["final_flag"] == dump["stages"][last]["flag"],
+    if sid == "disk-full":
+        df_text = fixture("df_h.txt")
+        du_lines = [line for line in fixture("du_sh.txt").splitlines() if line]
+        mount = dumped[0]["answer"]
+        logdir = dumped[1]["answer"]
+        emit(sum("100%" in line for line in df_text.splitlines()) == 1,
+             "disk-full: df fixture has exactly one full filesystem")
+        emit(any("100%" in line and line.split()[-1] == mount
+                 for line in df_text.splitlines()),
+             "disk-full: full filesystem row carries the checked mount")
+        emit(bool(du_lines) and du_lines[-1].split("\t", 1)[-1] == logdir,
+             "disk-full: largest du entry is the checked log directory")
+        emit(all(fixture(name) != NEUTRAL
+                 for name in ("df_h.txt", "du_sh.txt", "free_m.txt", "top.txt")),
+             "disk-full: resource fixtures contain scenario data")
+
+    if sid == "container-crash":
+        name, exit_code = dumped[0]["answer"].rsplit(":", 1)
+        missing_var = dumped[1]["answer"]
+        states = []
+        envs = []
+        for engine in ("docker", "podman"):
+            ps_text = fixture(engine + "_ps_a.txt")
+            logs_text = fixture(engine + "_logs.txt")
+            inspect = json.loads(fixture(engine + "_inspect.txt"))[0]
+            states.append(inspect["State"])
+            envs.append(inspect["Config"]["Env"])
+            emit(name in ps_text and ("Exited (%s)" % exit_code) in ps_text,
+                 "container-crash: %s ps fixture has the checked name and exit" % engine)
+            emit(missing_var in logs_text,
+                 "container-crash: %s logs fixture names the missing variable" % engine)
+            emit(inspect.get("Name", "").lstrip("/") == name
+                 and str(inspect["State"].get("ExitCode")) == exit_code
+                 and missing_var not in inspect["Config"]["Env"],
+                 "container-crash: %s inspect fixture confirms exit and missing env" % engine)
+        emit(fixture("docker_logs.txt") == fixture("podman_logs.txt"),
+             "container-crash: docker and podman log fixtures agree")
+        emit(states[0].get("ExitCode") == states[1].get("ExitCode") and envs[0] == envs[1],
+             "container-crash: docker and podman inspection facts agree")
+
+last = stage_lines[-1] if stage_lines else None
+emit(last is not None and dump["final_flag"] == dump["stages"][last]["flag"],
      "final flag is the last stage flag")
 with open(os.path.join(out, "final.sha256"), encoding="utf-8") as fh:
     final_digest = fh.read().strip()
@@ -433,21 +535,64 @@ emit(not leaks, "no answer dump under fs/", repr(leaks))
 
 sys.exit(1 if failures else 0)
 PY
-        gencheck_rc=$?
-        while IFS= read -r line; do
-            case $line in
-                "PASS  "*) ok "${line#PASS  }" ;;
-                "FAIL  "*) bad "${line#FAIL  }" ;;
-                *) printf '%s\n' "$line" ;;
-            esac
-        done <"$WORK/gencheck.log"
-        if [ "$gencheck_rc" -ne 0 ] && [ "$fail" -eq "$fail_before" ]; then
-            bad "generator assertion script exited nonzero without reporting a failure"
+
+    run_generator_case() {
+        gc_desc=$1
+        gc_label=$2
+        gc_set=$3
+        gc_pick=${4:-}
+        gc_out=$WORK/gen-$gc_label
+        gc_answers=$WORK/answers-$gc_label.json
+        gc_log=$WORK/gen-$gc_label.log
+        gc_check_log=$WORK/gencheck-$gc_label.log
+
+        # --set is required by the CLI; --pick overrides its count and order.
+        if [ -n "$gc_pick" ]; then
+            if python3 "$GEN" --seed "$SEED" --set "$gc_set" --profile troubleshoot \
+                    --pick "$gc_pick" --out "$gc_out" --dump-answers "$gc_answers" \
+                    >"$gc_log" 2>&1; then
+                gc_rc=0
+            else
+                gc_rc=$?
+            fi
+        else
+            if python3 "$GEN" --seed "$SEED" --set "$gc_set" --profile troubleshoot \
+                    --out "$gc_out" --dump-answers "$gc_answers" >"$gc_log" 2>&1; then
+                gc_rc=0
+            else
+                gc_rc=$?
+            fi
         fi
-    else
-        bad "generator troubleshoot run failed"
-        sed 's/^/        | /' "$WORK/gen.log"
-    fi
+
+        if [ "$gc_rc" -eq 0 ]; then
+            ok "$gc_desc ran (seed=$SEED)"
+            fail_before=$fail
+            python3 "$WORK/gencheck.py" "$gc_out" "$gc_answers" "$gc_pick" \
+                >"$gc_check_log" 2>&1
+            gencheck_rc=$?
+            while IFS= read -r line; do
+                case $line in
+                    "PASS  "*) ok "$gc_label: ${line#PASS  }" ;;
+                    "FAIL  "*) bad "$gc_label: ${line#FAIL  }" ;;
+                    *) printf '%s\n' "$line" ;;
+                esac
+            done <"$gc_check_log"
+            if [ "$gencheck_rc" -ne 0 ] && [ "$fail" -eq "$fail_before" ]; then
+                bad "$gc_label: generator assertion script exited nonzero without reporting a failure"
+            fi
+        else
+            bad "$gc_desc failed (rc=$gc_rc)"
+            sed 's/^/        | /' "$gc_log"
+        fi
+    }
+
+    run_generator_case "default four-template troubleshoot generation" default 4
+    run_generator_case "original two-template PICK" pilot-pick 2 \
+        svc-crashloop,k8s-crashloop
+    # A reversed, non-pool order and a deliberately different SET prove PICK
+    # controls both the exact subset order and the effective stage count.
+    run_generator_case "new two-template PICK with reversed order" new-pick 1 \
+        container-crash,disk-full
 fi
 
 # ---------------------------------------------------------------- summary

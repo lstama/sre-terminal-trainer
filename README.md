@@ -48,16 +48,18 @@ make best        # your local runs, fastest first
 
 `make new` tears down and starts a fresh challenge set. Run `make help` for the full target list.
 
-## Day 2 troubleshoot profile (pilot)
+## Day 2 troubleshoot profile
 
-A second profile (`PROFILE=troubleshoot`) reuses this same harness for two diagnostic stages that exercise the service and Kubernetes troubleshooting commands — `systemctl`, `journalctl`, `ss` and `kubectl`. Those commands are mocked: one small compiled binary is symlinked under each command name and prints a fixture, so there is no systemd, no privileged container and no Kubernetes cluster behind them.
+A second profile (`PROFILE=troubleshoot`) reuses this same harness for four diagnostic templates: the two original service and Kubernetes pilots (`svc-crashloop`, `k8s-crashloop`), plus disk-space triage (`disk-full`) and container-crash triage (`container-crash`). Alongside `systemctl`, `journalctl`, `ss` and `kubectl`, they exercise `df`, `du`, `free`, `top`, `docker` and `podman`. Those commands are mocked: one small compiled binary is symlinked under each command name and prints a fixture, so there is no privileged container, live service stack or container runtime behind them.
 
 ```sh
-make up PROFILE=troubleshoot PICK=svc-crashloop,k8s-crashloop
+make up PROFILE=troubleshoot                         # all four, seeded order
+# Or choose an exact subset and order:
+make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
 ```
 
-The briefs, hints, checks, flags, `verify` commands, timing records and `make down` / `make best` work exactly as above — only the drills change. Full pilot notes: [docs/troubleshooting.md](docs/troubleshooting.md).
+The briefs, hints, checks, flags, `verify` commands, timing records and `make down` / `make best` work exactly as above — only the drills change. Full notes: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Make targets
 
@@ -72,7 +74,7 @@ The briefs, hints, checks, flags, `verify` commands, timing records and `make do
 | `make test` | One up/down cycle, then assert the working tree is clean. |
 | `make clean` | Remove the container, image, `.instance/` and `state/`. |
 
-Variables: `ENGINE`, `IMAGE`, `CONTAINER`, `PORT`, `SET` (stages per run, default 8), `SEED`, `SSH_USER`, `INSTANCE` (credentials dir, default `.instance`) and `STATE` (records dir, default `state/`). Every target honours `ENGINE`, including the recursive `make` calls in `new` and `test`. The demo recorder uses `INSTANCE`/`STATE` to keep its own throwaway files.
+Variables: `ENGINE`, `IMAGE`, `CONTAINER`, `PORT`, `SET` (stages per run, default 8; troubleshoot default 4), `SEED`, `SSH_USER`, `INSTANCE` (credentials dir, default `.instance`) and `STATE` (records dir, default `state/`). Every target honours `ENGINE`, including the recursive `make` calls in `new` and `test`. The demo recorder uses `INSTANCE`/`STATE` to keep its own throwaway files.
 
 ## How it works
 
