@@ -845,7 +845,12 @@ FIXTURE_NAMES = [
     "kubectl_get_events.txt", "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
 ]
 NEUTRAL_FIXTURE = "no data for this scenario\n"
-TROUBLESHOOT_IDS = ["svc-crashloop", "k8s-crashloop"]
+# The Day 2 troubleshoot pool.  Order matters only for the seeded (no --pick)
+# selection; --pick uses the caller's order verbatim.  Each id is one stage
+# template; every run still emits all 30 fixtures above (unused = NEUTRAL).
+TROUBLESHOOT_IDS = [
+    "svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
+]
 TROUBLESHOOT_TEMPLATES = {}
 
 
@@ -869,8 +874,26 @@ def put_fixture(fixtures, name, content, tid):
     fixtures[name] = content
 
 
+def put_soft(soft, fixtures, name, content, tid):
+    """Claim a fixture that may legitimately be owned by another stage.
+
+    The flat fixture namespace means only one stage can define a given file.
+    ``disk-full`` wants to show a journal, but ``svc-crashloop`` already owns
+    ``journalctl_unit.txt``; when both are selected the hard fixture must win,
+    in either build order.  A soft entry is used only if no hard fixture claims
+    the same name by the time the run is written out.
+    """
+    if name not in FIXTURE_NAMES:
+        raise ValueError("%s: unknown fixture %r" % (tid, name))
+    if name in fixtures:
+        return                       # a hard fixture already owns it; drop this
+    if name in soft and soft[name] != content:
+        raise ValueError("%s: conflicting soft content for fixture %s" % (tid, name))
+    soft[name] = content
+
+
 @troubleshoot_template("svc-crashloop")
-def t_svc_crashloop(rng, fs, fixtures):
+def t_svc_crashloop(rng, fs, fixtures, soft):
     """Broken systemd unit: crash loop, port conflict and a drifted DB host."""
     svc = tok(rng, "svc", 6)
     unit = svc + ".service"
@@ -1028,7 +1051,7 @@ def t_svc_crashloop(rng, fs, fixtures):
 
 
 @troubleshoot_template("k8s-crashloop")
-def t_k8s_crashloop(rng, fs, fixtures):
+def t_k8s_crashloop(rng, fs, fixtures, soft):
     """Mocked kubectl: a CrashLoopBackOff caused by the wrong configmap key."""
     ns = tok(rng, "ns", 6)
     dep = tok(rng, "dep", 6)
@@ -1166,17 +1189,293 @@ def t_k8s_crashloop(rng, fs, fixtures):
     return instr, hints, checks
 
 
+@troubleshoot_template("disk-full")
+def t_disk_full(rng, fs, fixtures, soft):
+    """Resource exhaustion triage: a full filesystem, a runaway log directory
+    and a logrotate policy that never compresses or expires rotated logs."""
+    svc = tok(rng, "svc", 6)                 # random service id, shared by all paths
+    logdir = "/var/log/%s" % svc
+    rot = "/etc/logrotate.d/%s" % svc
+
+    # Only a filesystem that actually backs the runaway log directory can
+    # plausibly be the one at 100%, so the choice is /var or a dedicated
+    # /var/log volume; both keep /var/log/<svc> as the biggest directory.
+    full_mount = rng.choice(["/var", "/var", "/var/log"])
+    df_rows = [
+        ("/dev/sda2", "40G", "18G", "20G", "48%", "/"),
+        ("tmpfs", "3.9G", "1.4M", "3.9G", "1%", "/run"),
+        ("/dev/sda1", "512M", "182M", "304M", "38%", "/boot"),
+    ]
+    if full_mount == "/var":
+        df_rows.append(("/dev/mapper/vg0-var", "200G", "200G", "0", "100%", "/var"))
+        df_rows.append(("/dev/mapper/vg0-home", "500G", "180G", "294G", "38%", "/home"))
+    else:
+        df_rows.append(("/dev/mapper/vg0-var", "120G", "52G", "62G", "46%", "/var"))
+        df_rows.append(("/dev/mapper/vg0-log", "60G", "60G", "0", "100%", "/var/log"))
+        df_rows.append(("/dev/mapper/vg0-home", "500G", "180G", "294G", "38%", "/home"))
+    df_lines = ["Filesystem               Size  Used Avail Use% Mounted on"]
+    for dev, size, used, avail, pct, mnt in df_rows:
+        df_lines.append("%-24s %4s  %4s  %4s %4s %s" % (dev, size, used, avail, pct, mnt))
+    put_fixture(fixtures, "df_h.txt", "\n".join(df_lines) + "\n", "disk-full")
+
+    # du -sh /var/log/* | sort -h: ascending sizes, the runaway dir is last.
+    decoys = [
+        ("8.0K", "/var/log/private"),
+        ("1.2M", "/var/log/alternatives.log"),
+        ("14M", "/var/log/apt"),
+        ("96M", "/var/log/auth.log"),
+        ("420M", "/var/log/syslog"),
+        ("2.1G", "/var/log/journal"),
+    ]
+    big_size = rng.choice(["38G", "47G", "52G", "61G", "73G"])
+    du_lines = ["%s\t%s" % (size, path) for size, path in decoys]
+    du_lines.append("%s\t%s" % (big_size, logdir))
+    put_fixture(fixtures, "du_sh.txt", "\n".join(du_lines) + "\n", "disk-full")
+
+    total = rng.randint(15000, 17000)
+    used = rng.randint(3000, 5000)
+    cache = rng.randint(1500, 2600)
+    free = total - used - cache
+    avail = free + cache // 2
+    shared = rng.randint(80, 400)
+    put_fixture(fixtures, "free_m.txt", "\n".join([
+        "               total        used        free      shared  buff/cache   available",
+        "Mem:        %8d    %8d    %8d    %8d    %8d    %8d"
+        % (total, used, free, shared, cache, avail),
+        "Swap:       %8d    %8d    %8d" % (4096, 512, 3584),
+    ]) + "\n", "disk-full")
+
+    pid = rng.randint(1200, 32000)
+    load = "%.2f, %.2f, %.2f" % (
+        rng.uniform(0.1, 1.5), rng.uniform(0.1, 1.8), rng.uniform(0.1, 2.0))
+    put_fixture(fixtures, "top.txt", "\n".join([
+        "top - %02d:%02d:%02d up 12 days,  3:14,  1 user,  load average: %s"
+        % (rng.randint(0, 23), rng.randint(0, 59), rng.randint(0, 59), load),
+        "Tasks: 128 total,   1 running, 127 sleeping,   0 stopped,   0 zombie",
+        "%Cpu(s):  3.1 us,  1.2 sy,  0.0 ni, 95.4 id,  0.3 wa,  0.0 hi,  0.0 si,  0.0 st",
+        "MiB Mem :  %8.1f total, %8.1f free, %8.1f used, %8.1f buff/cache"
+        % (total, free, used, cache),
+        "MiB Swap:   4096.0 total,   3584.0 free,    512.0 used.  %8.1f avail Mem" % avail,
+        "",
+        "    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND",
+        "  %5d %-8s  20   0  812344  98760  12344 S   2.3   0.6   1:23.45 %s-agent"
+        % (pid, svc, svc),
+    ]) + "\n", "disk-full")
+
+    # The service journal is a soft fixture: svc-crashloop also owns
+    # journalctl_unit.txt, and a hard fixture must win in either build order.
+    journal = [
+        "%s %s[%d]: ERROR failed to write %s/app.log: No space left on device"
+        % (ts(rng), svc, pid, logdir)
+        for _ in range(rng.randint(4, 8))
+    ]
+    journal.append("%s systemd[1]: %s.service: failed to write to journal: "
+                   "No space left on device" % (ts(rng), svc))
+    put_soft(soft, fixtures, "journalctl_unit.txt", "\n".join(journal) + "\n", "disk-full")
+
+    # Real files so the drill is tangible: the log directory and the
+    # (deliberately 0666) logrotate policy the trainee must repair in place.
+    wfile(fs, logdir + "/app.log", "\n".join(
+        "%s %s[%d]: INFO request served" % (ts(rng), svc, pid) for _ in range(20)
+    ) + "\n")
+    rot_broken = "\n".join([
+        "%s/*.log {" % logdir,
+        "    daily",
+        "    missingok",
+        "    notifempty",
+        "    copytruncate",
+        "}",
+    ]) + "\n"
+    rot_fixed = "\n".join([
+        "%s/*.log {" % logdir,
+        "    daily",
+        "    rotate 7",
+        "    compress",
+        "    missingok",
+        "    notifempty",
+        "    copytruncate",
+        "}",
+    ]) + "\n"
+    # 0666 so the unprivileged trainee can rewrite it in place (like the
+    # svc-crashloop config); the directory stays root-owned.
+    wfile(fs, rot, rot_broken, mode=0o666)
+
+    # Load-bearing invariants: exactly one filesystem is full, the biggest du
+    # entry is the runaway log dir, and the broken policy really lacks the fix.
+    if not any(row[4] == "100%" and row[5] == full_mount for row in df_rows):
+        raise AssertionError("disk-full: 100%% row is not on %s" % full_mount)
+    if sum(" 100% " in line for line in df_lines) != 1:
+        raise AssertionError("disk-full: expected exactly one filesystem at 100%")
+    if not du_lines[-1].endswith(logdir):
+        raise AssertionError("disk-full: du output does not end on the runaway dir")
+    if "compress" in rot_broken or "rotate 7" in rot_broken:
+        raise AssertionError("disk-full: broken logrotate already contains the fix")
+    if rot_fixed == rot_broken:
+        raise AssertionError("disk-full: repaired logrotate equals the broken bytes")
+
+    checks = [
+        hash_check("disk-full-1", full_mount,
+                   "Submit the full mount point (the 'Mounted on' column) of the "
+                   "filesystem sitting at 100% in df -h.", plain=full_mount),
+        hash_check("disk-full-2", svc,
+                   "Submit the full path of the largest directory listed by "
+                   "du -sh /var/log/* | sort -h; its name ends with the service id.",
+                   plain=logdir),
+        file_check("disk-full-3", rot, rot_fixed, "logrotate-" + svc,
+                   "Repair %s in place: add `rotate 7` right after `daily`, then `compress` "
+                   "right after that, changing nothing else." % rot,
+                   initial=rot_broken),
+    ]
+    instr = (
+        "A host has run out of disk space; application writes fail with 'No space left on "
+        "device'. Triage it with the standard checklist: `df -h` shows which mounted "
+        "filesystem is at 100%%, `du -sh /var/log/* | sort -h` shows which log directory is "
+        "largest, and `free -m` / `top` give memory and CPU pressure for context.\n\n"
+        "The logs are filling the disk because the logrotate policy at %s never compresses "
+        "or expires rotated files. Its corrected end state is byte-for-byte the shipped file "
+        "with exactly two lines added: `    rotate 7` immediately after the `daily` line, and "
+        "`    compress` immediately after that. Leave the log path, the other options and the "
+        "closing brace unchanged, and edit the file in place." % rot
+    )
+    hints = [
+        "Checklist: df -h lists every mount with its Use%%; the one at 100%% is the "
+        "partition that filled up (its 'Mounted on' value is the answer).",
+        "Checklist: du -sh /var/log/* | sort -h orders directories by size; the largest is "
+        "the runaway log directory and its name carries the service id.",
+        "Checklist: in nano, add the two option lines, Ctrl+O writes in place and Ctrl+X "
+        "exits; `cat %s` confirms the final bytes." % rot,
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("container-crash")
+def t_container_crash(rng, fs, fixtures, soft):
+    """Container troubleshooting: an app container exits 1 because a required
+    environment variable is unset in its .env file."""
+    name = tok(rng, "api", 6)                # container name, also the env basename
+    digest = hexs(rng, 12)                    # 12-hex container id
+    tag = "%d.%d.%d" % (rng.randint(1, 4), rng.randint(0, 9), rng.randint(0, 9))
+    image = "registry.example/%s:%s" % (name, tag)
+    secret = tok(rng, "cfg", 8)              # random config fragment printed in logs
+    missing_var = "SVC_KEY_" + hexs(rng, 4).upper()
+    exit_code = 1
+    envf = "/home/trainee/containers/%s.env" % name
+    created = "%d minutes ago" % rng.randint(3, 25)
+    finished = "%d minutes ago" % rng.randint(1, 4)
+
+    env_broken = "\n".join([
+        "# environment for %s (managed by ops)" % name,
+        "LOG_LEVEL=info",
+        "PORT=8080",
+    ]) + "\n"
+    env_fixed = env_broken + "%s=%s\n" % (missing_var, secret)
+    wfile(fs, envf, env_broken, mode=0o644)
+
+    status = "Exited (%d) %s" % (exit_code, finished)
+    docker_ps = "\n".join([
+        "CONTAINER ID   IMAGE                                 COMMAND                  "
+        "CREATED          STATUS                      PORTS     NAMES",
+        "%s   %-36s  \"/usr/local/bin/entry…\"   %-15s  %-26s            %s"
+        % (digest, image, created, status, name),
+    ]) + "\n"
+    put_fixture(fixtures, "docker_ps_a.txt", docker_ps, "container-crash")
+    podman_ps = "\n".join([
+        "CONTAINER ID  IMAGE                                 COMMAND               "
+        "CREATED         STATUS                      PORTS       NAMES",
+        "%s  %-36s  /usr/local/bin/entry  %-14s  %-26s              %s"
+        % (digest, image, created, status, name),
+    ]) + "\n"
+    put_fixture(fixtures, "podman_ps_a.txt", podman_ps, "container-crash")
+
+    logs = "\n".join([
+        "%s %s: starting %s %s (build %s)" % (ts(rng), name, name, tag, secret),
+        "%s %s: FATAL: required environment variable %s is not set (config %s); "
+        "refusing to start" % (ts(rng), name, missing_var, secret),
+        "%s %s: exiting with status %d" % (ts(rng), name, exit_code),
+    ]) + "\n"
+    put_fixture(fixtures, "docker_logs.txt", logs, "container-crash")
+    put_fixture(fixtures, "podman_logs.txt", logs, "container-crash")
+
+    inspect_docker = (
+        '[{"Id":"%s","Name":"/%s","Config":{"Image":"%s",'
+        '"Env":["LOG_LEVEL=info","PORT=8080"]},'
+        '"State":{"Status":"exited","ExitCode":%d,"Error":"","OOMKilled":false},'
+        '"Labels":{"config-id":"%s"}}]'
+        % (digest, name, image, exit_code, secret)
+    )
+    put_fixture(fixtures, "docker_inspect.txt", inspect_docker + "\n", "container-crash")
+    inspect_podman = (
+        '[{"Id":"%s","Name":"%s","Image":"%s","Config":{"Env":["LOG_LEVEL=info",'
+        '"PORT=8080"]},"State":{"Status":"exited","ExitCode":%d,"OOMKilled":false,'
+        '"Error":""},"Labels":{"config-id":"%s"}}]'
+        % (digest, name, image, exit_code, secret)
+    )
+    put_fixture(fixtures, "podman_inspect.txt", inspect_podman + "\n", "container-crash")
+
+    # Load-bearing invariants: the break is real and each clue is discoverable.
+    if missing_var in env_broken or secret in env_broken:
+        raise AssertionError("container-crash: broken env file already solved")
+    if name not in docker_ps or ("Exited (%d)" % exit_code) not in docker_ps:
+        raise AssertionError("container-crash: docker ps missing name/exit status")
+    if ("Exited (%d)" % exit_code) not in podman_ps:
+        raise AssertionError("container-crash: podman ps missing exit status")
+    if missing_var not in fixtures["docker_logs.txt"]:
+        raise AssertionError("container-crash: missing variable not named in logs")
+    if secret not in fixtures["docker_logs.txt"]:
+        raise AssertionError("container-crash: config fragment not in logs")
+    if missing_var in fixtures["docker_inspect.txt"]:
+        raise AssertionError("container-crash: missing var must not be in inspect Env")
+    if env_fixed == env_broken:
+        raise AssertionError("container-crash: repaired env equals the broken bytes")
+
+    name_answer = "%s:%d" % (name, exit_code)
+    checks = [
+        hash_check("container-crash-1", name,
+                   "Submit the container name and its exit code from `docker ps -a` (or "
+                   "`podman ps -a`), joined by a colon (name first).", plain=name_answer),
+        hash_check("container-crash-2", missing_var,
+                   "Submit the environment variable the container logs say is not set.",
+                   plain=missing_var),
+        file_check("container-crash-3", envf, env_fixed, secret,
+                   "Repair %s: append the line `<missing-variable>=%s`, where the variable "
+                   "name is the one the logs report missing. Leave every existing line "
+                   "unchanged." % (envf, secret), initial=env_broken),
+    ]
+    instr = (
+        "A container is crash-looping: it starts and exits almost immediately with a "
+        "non-zero exit code because a required environment variable is unset. Triage it "
+        "with the container tooling: `docker ps -a` (or `podman ps -a`) shows the container "
+        "name and its `Exited (N)` status, `docker logs <name>` (or `podman logs <name>`) "
+        "shows the fatal config error, and `docker inspect <name>` / `podman inspect <name>` "
+        "shows the container's environment and exit code.\n\n"
+        "The environment file to repair is %s. Its corrected end state is byte-for-byte the "
+        "shipped file with exactly one line appended at the end: `<missing-variable>=%s`, "
+        "where <missing-variable> is the variable the logs say is not set and the value is "
+        "exactly `%s`. Leave every existing line unchanged and edit the file in place."
+        % (envf, secret, secret)
+    )
+    hints = [
+        "Checklist: docker ps -a / podman ps -a shows STATUS 'Exited (N)'; N is the exit "
+        "code and the NAMES column is the container name.",
+        "Checklist: docker logs <name> / podman logs <name> prints the FATAL line naming the "
+        "unset variable; docker inspect / podman inspect shows Config.Env without that key.",
+        "Checklist: append the corrected line to the .env in place with nano (Ctrl+O writes, "
+        "Ctrl+X exits) and confirm the exact bytes with cat.",
+    ]
+    return instr, hints, checks
+
+
 # ---------------------------------------------------------------------------
 # output assembly
 # ---------------------------------------------------------------------------
 
-def build_stage(tid, seed, fsroot, fixtures=None):
+def build_stage(tid, seed, fsroot, fixtures=None, soft=None):
     t_rng_seed = int.from_bytes(
         hashlib.sha256(("%s|%s" % (seed, tid)).encode("utf-8")).digest()[:8], "big"
     )
     rng = random.Random(t_rng_seed)
     if fixtures is not None and tid in TROUBLESHOOT_TEMPLATES:
-        instr, hints, checks = TROUBLESHOOT_TEMPLATES[tid](rng, fsroot, fixtures)
+        instr, hints, checks = TROUBLESHOOT_TEMPLATES[tid](rng, fsroot, fixtures, soft)
     else:
         instr, hints, checks = TEMPLATES[tid](rng, fsroot)
     frags = [c["fragment"] for c in checks]
@@ -1236,12 +1535,15 @@ def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
             order = sel.sample(TROUBLESHOOT_IDS, count)
             sel.shuffle(order)
         fixtures = {}
-        stages = [build_stage(tid, seed, fsroot, fixtures) for tid in order]
+        soft = {}
+        stages = [build_stage(tid, seed, fsroot, fixtures, soft) for tid in order]
 
         fixturesdir = os.path.join(out, "fixtures")
         os.makedirs(fixturesdir, exist_ok=True)
         for name in FIXTURE_NAMES:
-            content = fixtures.get(name, NEUTRAL_FIXTURE)
+            content = fixtures.get(name)
+            if content is None:
+                content = soft.get(name, NEUTRAL_FIXTURE)
             with open(os.path.join(fixturesdir, name), "w",
                       encoding="utf-8", newline="\n") as fh:
                 fh.write(content)
@@ -1307,13 +1609,16 @@ def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
 # ---------------------------------------------------------------------------
 
 def self_test(seeds, verbose=True):
-    """Generate a full 16-stage set per seed and cross-foot answers against disk.
+    """Generate a full 16-stage terminal set *and* the 4-stage troubleshoot set
+    per seed, then cross-foot every answer against the artefacts on disk.
 
     The templates assert their own load-bearing invariants while generating (e.g.
     ``top-talker`` re-reads its log and computes the busiest client).  This routine
     adds the independent, generator-wide checks: flag formula vs ``checks.tsv``
-    order, file checks not shipped pre-solved, no answer dump under ``fs/``, and the
-    two drill-specific claims (top talker, config-drift baseline token).
+    order, file checks not shipped pre-solved, no answer dump under ``fs/``, the
+    two drill-specific claims (top talker, config-drift baseline token), and for
+    troubleshoot: the full 30-fixture contract, broken initial files, and the
+    df/du and docker-ps clue placement for the two new drills.
     """
     import re
     import tempfile
@@ -1435,6 +1740,115 @@ def self_test(seeds, verbose=True):
             for dirpath, _dirnames, filenames in os.walk(fsroot):
                 check("answers.json" not in filenames,
                       "seed %d: answers.json leaked into %s" % (seed, dirpath))
+
+            # ---- troubleshoot profile: all four templates, all 30 fixtures ----
+            with tempfile.TemporaryDirectory(prefix="sre-selftest-ts.") as ts_tmp:
+                ts_dump_path = os.path.join(ts_tmp, "answers.json")
+                ts_stages, ts_order, ts_final = write_outputs(
+                    seed, len(TROUBLESHOOT_IDS), ts_tmp, ts_dump_path,
+                    profile="troubleshoot", pick=list(TROUBLESHOOT_IDS))
+                with open(ts_dump_path, "r", encoding="utf-8") as fh:
+                    ts_dump = json.load(fh)
+                ts_fs = os.path.join(ts_tmp, "fs")
+                ts_fixtures = os.path.join(ts_tmp, "fixtures")
+
+                present = sorted(os.listdir(ts_fixtures)) if os.path.isdir(ts_fixtures) else []
+                missing = [n for n in FIXTURE_NAMES if n not in present]
+                extra = [n for n in present if n not in FIXTURE_NAMES]
+                check(present == sorted(FIXTURE_NAMES),
+                      "seed %d: troubleshoot fixtures set mismatch (missing=%s extra=%s)"
+                      % (seed, missing, extra))
+                check(ts_order == list(TROUBLESHOOT_IDS),
+                      "seed %d: troubleshoot pick order mismatch" % seed)
+                check(ts_dump["order"] == list(TROUBLESHOOT_IDS),
+                      "seed %d: troubleshoot dump order mismatch" % seed)
+                check(ts_dump["set"] == len(TROUBLESHOOT_IDS),
+                      "seed %d: troubleshoot dump set size" % seed)
+                check(ts_final == ts_stages[-1]["flag"],
+                      "seed %d: troubleshoot final flag is not the last stage flag" % seed)
+                with open(os.path.join(ts_tmp, "manifest"), "r", encoding="utf-8") as fh:
+                    ts_manifest = fh.read().splitlines()
+                check(ts_manifest == ["SEED %d" % seed, "STAGES %d" % len(TROUBLESHOOT_IDS)]
+                      + ["STAGE " + tid for tid in TROUBLESHOOT_IDS],
+                      "seed %d: troubleshoot manifest mismatch: %r" % (seed, ts_manifest))
+
+                for idx, stage in enumerate(ts_stages, 1):
+                    sid = stage["id"]
+                    sd = os.path.join(ts_tmp, "stages", "%02d" % idx)
+                    with open(os.path.join(sd, "checks.tsv"), "r", encoding="utf-8") as fh:
+                        blocks = [b for b in fh.read().split("\n\n") if b.strip()]
+                    check(len(blocks) == 3, "seed %d %s: expected 3 checks, got %d"
+                          % (seed, sid, len(blocks)))
+                    rows = []
+                    for block in blocks:
+                        kv = {}
+                        for line in block.splitlines():
+                            k, _, v = line.partition("=")
+                            kv[k] = v
+                        rows.append(kv)
+                    frags = [r.get("fragment", "") for r in rows]
+                    check(("FLAG{" + sha_text("|".join(frags))[:12] + "}") == stage["flag"],
+                          "seed %d %s: flag does not recompute from checks.tsv" % (seed, sid))
+                    check(ts_dump["stages"][sid]["flag"] == stage["flag"],
+                          "seed %d %s: dump flag mismatch" % (seed, sid))
+                    dumped = {d["id"]: d for d in ts_dump["stages"][sid]["checks"]}
+                    for row in rows:
+                        cid = row["id"]
+                        check(cid in dumped, "seed %d %s: %s missing from dump" % (seed, sid, cid))
+                        row_dump = dumped.get(cid, {})
+                        if row.get("type") == "hash":
+                            check(re.fullmatch(r"[0-9a-f]{64}", row.get("answer", "")) is not None,
+                                  "seed %d %s/%s: answer is not a sha256" % (seed, sid, cid))
+                            check(sha_text(row_dump.get("answer", "")) == row.get("answer"),
+                                  "seed %d %s/%s: dump answer does not hash to checks.tsv"
+                                  % (seed, sid, cid))
+                        elif row.get("type") == "file":
+                            shipped = os.path.join(ts_fs, row["path"].lstrip("/"))
+                            with open(shipped, "rb") as fh:
+                                data = fh.read()
+                            check(sha_bytes(data) != row["sha256"],
+                                  "seed %d %s/%s: file ships already solved"
+                                  % (seed, sid, cid))
+                            check(row_dump.get("sha256") == row["sha256"],
+                                  "seed %d %s/%s: dump sha256 mismatch" % (seed, sid, cid))
+                            check(sha_text(row_dump.get("answer", "")) == row["sha256"],
+                                  "seed %d %s/%s: repaired bytes do not hash to sha256"
+                                  % (seed, sid, cid))
+                        else:
+                            check(False, "seed %d %s/%s: unknown check type" % (seed, sid, cid))
+                    with open(os.path.join(sd, "instruction"), "r", encoding="utf-8") as fh:
+                        ts_instr = fh.read()
+                    for c in stage["checks"]:
+                        check(c["id"] in ts_instr,
+                              "seed %d %s: instruction omits %s" % (seed, sid, c["id"]))
+
+                # The new drills must surface their clues in the real fixtures.
+                if "disk-full" in ts_order:
+                    with open(os.path.join(ts_fixtures, "df_h.txt"), encoding="utf-8") as fh:
+                        df = fh.read()
+                    with open(os.path.join(ts_fixtures, "du_sh.txt"), encoding="utf-8") as fh:
+                        du = fh.read()
+                    ans = [c["answer"] for c in ts_dump["stages"]["disk-full"]["checks"]]
+                    check(df.count("100%") == 1,
+                          "seed %d: df_h must show exactly one 100%% filesystem" % seed)
+                    check(ans[0] in df, "seed %d: disk-full mount answer not in df_h" % seed)
+                    check(ans[1] in du, "seed %d: disk-full dir answer not in du_sh" % seed)
+                if "container-crash" in ts_order:
+                    with open(os.path.join(ts_fixtures, "docker_ps_a.txt"),
+                              encoding="utf-8") as fh:
+                        ps = fh.read()
+                    with open(os.path.join(ts_fixtures, "docker_logs.txt"),
+                              encoding="utf-8") as fh:
+                        logs = fh.read()
+                    ans = [c["answer"] for c in ts_dump["stages"]["container-crash"]["checks"]]
+                    cname, _, cexit = ans[0].rpartition(":")
+                    check(cname and cname in ps and ("Exited (%s)" % cexit) in ps,
+                          "seed %d: container name/exit not in docker ps" % seed)
+                    check(ans[1] in logs, "seed %d: missing var not in logs" % seed)
+
+                if verbose:
+                    print("selftest seed %d: troubleshoot %d stages + %d fixtures checked"
+                          % (seed, len(ts_stages), len(present)))
 
             if verbose:
                 print("selftest seed %d: %d stages checked" % (seed, len(stages)))
