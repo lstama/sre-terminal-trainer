@@ -30,6 +30,10 @@ included), with a real 8/8 solve under Podman.
   the default troubleshoot pool to six, and extended docs/smoke/self-test coverage.
   Docker verification includes a full two-stage SSH solve with both file repairs;
   `make test` passes 111 verifier and 369 troubleshoot assertions.
+- T28 (`feat/troubleshoot-wave3`): fixed the literal `%%` in the generated DNS ping
+  fixture and made `PICK` override troubleshoot `SET` range validation. Verified
+  `PICK=nginx-config,dns-mismatch SET=8` with a full two-stage Docker SSH solve and
+  record save; no-PICK `SET=7` is still rejected before side effects.
 
 ## Fixes landed in T05
 

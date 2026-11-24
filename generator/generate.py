@@ -1650,7 +1650,7 @@ def t_dns_mismatch(rng, fs, fixtures, soft):
         % (wrong_host, wrong_ip),
         "",
         "--- %s ping statistics ---" % wrong_host,
-        "2 packets transmitted, 2 received, 0%% packet loss, time 1001ms",
+        "2 packets transmitted, 2 received, 0% packet loss, time 1001ms",
     ]) + "\n", "dns-mismatch")
     put_fixture(fixtures, "nc_zv.txt", "\n".join([
         "nc: connect to %s (%s) port %d (tcp) failed: Connection refused"

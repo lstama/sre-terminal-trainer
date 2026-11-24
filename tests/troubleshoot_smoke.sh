@@ -635,8 +635,10 @@ for index, sid in enumerate(stage_lines, 1):
              and connection_fragment in fixture("nc_zv.txt")
              and "Connection refused" in fixture("nc_zv.txt"),
              "dns-mismatch: transport fixtures share the checked connection fragment")
-        emit(wrong_host in fixture("ping.txt"),
-             "dns-mismatch: ping corroborates the stale host")
+        ping_text = fixture("ping.txt")
+        emit(wrong_host in ping_text and "0% packet loss" in ping_text
+             and "%%" not in ping_text,
+             "dns-mismatch: ping corroborates the stale host and renders packet loss literally")
         emit(all(fixture(name) != NEUTRAL for name in
                  ("dig.txt", "nslookup.txt", "curl_I.txt", "curl_v.txt",
                   "ping.txt", "nc_zv.txt")),

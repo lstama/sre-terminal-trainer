@@ -81,7 +81,7 @@ help:
 	  'Both are gitignored; only source, config and docs are committed.'
 
 up:
-	@if [ '$(PROFILE)' = troubleshoot ]; then
+	@if [ '$(PROFILE)' = troubleshoot ] && [ -z '$(PICK)' ]; then
 	  case '$(SET)' in
 	    1|2|3|4|5|6) ;;
 	    *) echo "error: PROFILE=troubleshoot supports SET=1..6 (pool of 6 templates); got $(SET)" >&2; exit 1 ;;
