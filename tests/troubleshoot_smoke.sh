@@ -8,7 +8,7 @@
 # paths and byte-for-byte passthrough.
 #
 # Part 2 (runs when the generator has --profile support): generate the default
-# twelve-template pool and ordered PICK subsets, then assert the fixture contract,
+# fourteen-template pool and ordered PICK subsets, then assert the fixture contract,
 # manifests, checks.tsv shape, stage/final flag recomputation, generated scenario
 # clues and that no file check ships already solved. If the generator has no
 # troubleshoot profile yet, part 2 is reported as pending (a SKIP, not a failure).
@@ -452,7 +452,8 @@ FIXTURES = [
 ]
 POOL = ["svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
         "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict",
-        "oom-kill", "image-pull", "svc-selector", "resource-limits"]
+        "oom-kill", "image-pull", "svc-selector", "resource-limits",
+        "tls-expiry", "dependency-down"]
 NEUTRAL = "no data for this scenario\n"
 PICK = pick_arg.split(",") if pick_arg else None
 expected_count = len(PICK) if PICK else len(POOL)
@@ -486,7 +487,7 @@ if PICK:
 else:
     emit(len(stage_lines) == len(POOL) and len(set(stage_lines)) == len(POOL)
          and set(stage_lines) == set(POOL),
-         "default generation selects each of the twelve templates exactly once",
+         "default generation selects each of the fourteen templates exactly once",
          repr(stage_lines))
     emit(dump.get("order") == stage_lines,
          "answers dump order matches the default manifest order", repr(dump.get("order")))
@@ -692,6 +693,114 @@ for index, sid in enumerate(stage_lines, 1):
              and pod not in hint_text and oom_fragment not in hint_text
              and (not memory_limit or memory_limit not in hint_text),
              "resource-limits: instruction and hints do not reveal answers")
+
+    if sid == "tls-expiry":
+        tls_checks = dumped
+        certificate_answer = tls_checks[0]["answer"]
+        current_path = tls_checks[1]["answer"]
+        checked_path = tls_checks[2]["path"]
+        fixed_text = tls_checks[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        initial_match = re.search(r"^certificate_file = (.+)$", initial_text, re.MULTILINE)
+        fixed_match = re.search(r"^certificate_file = (.+)$", fixed_text, re.MULTILINE)
+        expired_path = initial_match.group(1) if initial_match else ""
+        fixed_path = fixed_match.group(1) if fixed_match else ""
+        answer_parts = certificate_answer.split(":", 2)
+        cn = answer_parts[0] if len(answer_parts) == 3 else ""
+        expiry_date = answer_parts[1] if len(answer_parts) == 3 else ""
+        expiry_fragment = answer_parts[2] if len(answer_parts) == 3 else ""
+        curl_v = fixture("curl_v.txt")
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "tls-expiry: two hash checks precede the file check")
+        emit(re.fullmatch(r"/etc/[^/]+/tls\.conf", checked_path) is not None,
+             "tls-expiry: checked config follows /etc/<svc>/tls.conf")
+        emit(bool(cn) and re.fullmatch(r"202[45]-\d{2}-\d{2}", expiry_date) is not None
+             and ("subject: CN=" + cn) in curl_v and ("expire date: " + expiry_date) in curl_v
+             and ("certificate expiry fragment: " + expiry_fragment) in curl_v,
+             "tls-expiry: curl -v carries the checked CN, expiry date and fragment")
+        emit("SSL certificate verify failed" in curl_v
+             and "certificate has expired" in curl_v,
+             "tls-expiry: verbose and head requests show certificate verification failure")
+        emit(bool(expired_path) and expired_path != current_path
+             and current_path == fixed_path and current_path in curl_v
+             and fixed_text == initial_text.replace(expired_path, current_path),
+             "tls-expiry: repair changes only the expired path to the curl reference")
+        dig_text = fixture("dig.txt")
+        nc_text = fixture("nc_zv.txt")
+        answer_row = next((line for line in dig_text.splitlines()
+                           if line.startswith(cn + ". ") and " IN A " in line), "")
+        emit(bool(answer_row) and cn in fixture("curl_I.txt"),
+             "tls-expiry: DNS resolves the certificate host and curl -I names it")
+        own_nc = next((line for line in nc_text.splitlines()
+                       if line.startswith("Connection to " + cn + " ") and "succeeded" in line), "")
+        emit(bool(own_nc), "tls-expiry: nc shows the certificate host port open")
+        emit(all(command in instruction for command in
+                  ("curl -v", "curl -I", "dig", "nc -zv")),
+             "tls-expiry: instruction teaches the TLS triage checklist")
+        emit(certificate_answer not in instruction and current_path not in instruction
+             and certificate_answer not in hint_text and current_path not in hint_text,
+             "tls-expiry: instruction and hints do not reveal answers")
+
+    if sid == "dependency-down":
+        dep_checks = dumped
+        dependency_answer = dep_checks[0]["answer"]
+        correct_port = dep_checks[1]["answer"]
+        checked_path = dep_checks[2]["path"]
+        fixed_text = dep_checks[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        answer_parts = dependency_answer.split(":", 1)
+        dependency_unit = answer_parts[0] if len(answer_parts) == 2 else ""
+        incident = answer_parts[1] if len(answer_parts) == 2 else ""
+        wrong_host_match = re.search(r"^dependency_host = (.+)$", initial_text, re.MULTILINE)
+        correct_host_match = re.search(r"^dependency_host = (.+)$", fixed_text, re.MULTILINE)
+        wrong_port_match = re.search(r"^dependency_port = (\d+)$", initial_text, re.MULTILINE)
+        fixed_port_match = re.search(r"^dependency_port = (\d+)$", fixed_text, re.MULTILINE)
+        wrong_host = wrong_host_match.group(1) if wrong_host_match else ""
+        correct_host = correct_host_match.group(1) if correct_host_match else ""
+        wrong_port = wrong_port_match.group(1) if wrong_port_match else ""
+        fixed_port = fixed_port_match.group(1) if fixed_port_match else ""
+        status = fixture("systemctl_status.txt")
+        journal = fixture("journalctl_unit.txt")
+        ss_text = fixture("ss_tlnp.txt")
+        curl_text = fixture("curl_v.txt")
+        ping_text = fixture("ping.txt")
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "dependency-down: two hash checks precede the file check")
+        emit(re.fullmatch(r"/etc/([^/]+)/\1\.conf", checked_path) is not None,
+             "dependency-down: checked config follows /etc/<svc>/<svc>.conf")
+        emit(bool(dependency_unit) and "Active: failed" in status
+             and dependency_unit in status and incident in status and incident in journal
+             and dependency_unit in journal,
+             "dependency-down: status/journal share the failed unit and incident fragment")
+        emit("Connection refused" in journal and wrong_host in journal
+             and wrong_port in journal and correct_host in journal and correct_port in journal,
+             "dependency-down: journal contrasts the refused and approved endpoints")
+        emit(bool(correct_port) and correct_port == fixed_port and correct_port != wrong_port
+             and correct_port in ss_text and wrong_port not in ss_text,
+             "dependency-down: ss listens on the checked port but not the configured port")
+        emit("502 Bad Gateway" in curl_text and dependency_unit in curl_text
+             and wrong_host in curl_text and wrong_port in curl_text,
+             "dependency-down: curl shows the app's 502 and downstream target")
+        emit(correct_host in ping_text and "0% packet loss" in ping_text,
+             "dependency-down: ping confirms dependency host reachability")
+        expected_fixed = initial_text.replace("dependency_host = " + wrong_host,
+                                               "dependency_host = " + correct_host).replace(
+            "dependency_port = " + wrong_port, "dependency_port = " + correct_port)
+        emit(bool(wrong_host) and wrong_host != correct_host
+             and fixed_text == expected_fixed and fixed_text != initial_text,
+             "dependency-down: repair changes only dependency host and port")
+        emit(all(command in instruction for command in
+                  ("systemctl status", "journalctl -u", "curl -v", "ss -tlnp")),
+             "dependency-down: instruction teaches the dependency triage checklist")
+        emit(dependency_answer not in instruction and correct_host not in instruction
+             and ("dependency_port = " + correct_port) not in instruction
+             and dependency_answer not in hint_text and correct_host not in hint_text
+             and ("dependency_port = " + correct_port) not in hint_text,
+             "dependency-down: instruction and hints do not reveal answers")
 
     if sid == "disk-full":
         df_text = fixture("df_h.txt")
@@ -1101,7 +1210,7 @@ PY
         fi
     }
 
-    run_generator_case "default twelve-template troubleshoot generation" default 12
+    run_generator_case "default fourteen-template troubleshoot generation" default 14
     run_generator_case "original two-template PICK" pilot-pick 2 \
         svc-crashloop,k8s-crashloop
     # A reversed, non-pool order and a deliberately different SET prove PICK
@@ -1128,6 +1237,28 @@ PY
         resource-limits,k8s-crashloop,svc-selector
     run_generator_case "mixed Kubernetes PICK reversed" wave6-mixed-reversed 12 \
         svc-selector,k8s-crashloop,resource-limits
+    run_generator_case "wave-seven two-template PICK" wave7-pick 1 \
+        tls-expiry,dependency-down
+    run_generator_case "wave-seven PICK in reversed order" wave7-reversed 14 \
+        dependency-down,tls-expiry
+    run_generator_case "mixed shared-evidence PICK" wave7-mixed 1 \
+        tls-expiry,dns-mismatch,dependency-down,svc-crashloop,port-conflict,oom-kill,svc-selector
+    run_generator_case "mixed shared-evidence PICK reversed" wave7-mixed-reversed 14 \
+        svc-selector,oom-kill,port-conflict,svc-crashloop,dependency-down,dns-mismatch,tls-expiry
+    if diff -r "$WORK/gen-wave7-pick/fixtures" "$WORK/gen-wave7-reversed/fixtures" \
+            >"$WORK/wave7-fixture-diff.log" 2>&1; then
+        ok "wave-seven fixture bytes are independent of PICK order"
+    else
+        bad "wave-seven fixture bytes differ between forward and reversed PICK"
+        sed 's/^/        | /' "$WORK/wave7-fixture-diff.log"
+    fi
+    if diff -r "$WORK/gen-wave7-mixed/fixtures" "$WORK/gen-wave7-mixed-reversed/fixtures" \
+            >"$WORK/mixed-wave7-fixture-diff.log" 2>&1; then
+        ok "mixed shared-evidence fixture bytes are independent of PICK order"
+    else
+        bad "mixed shared-evidence fixture bytes differ between forward and reversed PICK"
+        sed 's/^/        | /' "$WORK/mixed-wave7-fixture-diff.log"
+    fi
     if diff -r "$WORK/gen-wave6-pick/fixtures" "$WORK/gen-wave6-reversed/fixtures" \
             >"$WORK/wave6-fixture-diff.log" 2>&1; then
         ok "wave-six fixture bytes are independent of PICK order"

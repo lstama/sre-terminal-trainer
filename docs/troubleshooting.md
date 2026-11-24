@@ -1,6 +1,6 @@
 # Day 2: the troubleshoot profile
 
-The trainer's second profile is a pool of twelve diagnostic drills whose terminal
+The trainer's second profile is a pool of fourteen diagnostic drills whose terminal
 commands are answered from fixtures instead of a live machine. It exists to
 practise the read-then-repair loop — inspect the evidence, decide on one change,
 make it, prove it — without shipping a privileged container, a systemd host or a
@@ -14,11 +14,11 @@ profile, the interaction is identical; only the stages differ.
 - Profile flag: `PROFILE=troubleshoot`
 - Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`,
   `nginx-config`, `dns-mismatch`, `selinux-avc`, `port-conflict`, `oom-kill`,
-  `image-pull`, `svc-selector`, `resource-limits`
+  `image-pull`, `svc-selector`, `resource-limits`, `tls-expiry`, `dependency-down`
 - Image / container: `sre-terminal-trainer-troubleshoot:local` / `sre-trainer-troubleshoot`
   (separate from the default names, so both profiles can run side by side)
 
-## The twelve templates
+## The fourteen templates
 
 Each stage's brief names the exact files and check ids. The checklists below are
 the commands the stage is built around; the facts they expose are randomized per
@@ -240,6 +240,42 @@ repairs a deployment under `/home/trainee/k8s/` by inserting only the missing
 revealed by the fixtures. Every existing line must remain byte-for-byte
 unchanged.
 
+### `tls-expiry`
+
+An HTTPS endpoint fails certificate validation. Separate DNS and transport health
+from the certificate itself before touching the service configuration:
+
+| Command | What it is for |
+|---|---|
+| `curl -v <https-url>` | Connection progress, certificate CN, validity dates, expiry fragment and the current-certificate reference |
+| `curl -I <https-url>` | Corroborates that certificate verification fails before a response |
+| `dig <name> A` | Confirms that the certificate hostname resolves |
+| `nc -zv <host> 443` | Confirms that the TCP port is open despite the TLS failure |
+
+One hash check uses the certificate identity and expiry evidence; another uses
+the current certificate path revealed by the verbose report. The file check
+repairs `/etc/<svc>/tls.conf` by changing only `certificate_file`. Every other
+line, including the key path and listener, must remain byte-for-byte unchanged.
+
+### `dependency-down`
+
+An application returns a gateway failure because its downstream dependency
+refuses the configured connection. Correlate unit, journal, socket and network
+evidence:
+
+| Command | What it is for |
+|---|---|
+| `systemctl status <dependency-unit>` | Failed dependency state, unit identity, incident fragment and endpoint environment |
+| `journalctl -u <app-unit> -n 100 --no-pager` | The refused configured endpoint and the approved dependency endpoint |
+| `curl -v <app-url>` | The application's 502 and downstream target |
+| `ss -tlnp` | The dependency port actually listening, distinct from the configured port |
+| `ping <dependency-host>` | Host reachability, which does not prove the service port is available |
+
+One hash check uses the dependency unit and incident fragment; another uses the
+listening dependency port corroborated by the endpoint clues. The file check
+repairs `/etc/<svc>/<svc>.conf` by changing only `dependency_host` and
+`dependency_port` to the approved endpoint, preserving every other byte.
+
 ## How the mocks work
 
 Orchestration detail, not something a trainee needs to act on.
@@ -260,8 +296,9 @@ Orchestration detail, not something a trainee needs to act on.
   missing final newline are preserved. When selected stages share evidence,
   the generator composes it in a canonical order: socket, Kubernetes and
   container table rows are combined, inspection arrays retain every object,
-  and labelled journal, memory, container-log and Kubernetes describe/log
-  reports stay intact. Every selected stage therefore keeps its own clues
+  and labelled journal, memory, container-log, status, DNS, ping, nc and
+   Kubernetes describe/log reports stay intact. Every selected stage therefore
+   keeps its own clues
   regardless of `PICK` order.
 - **Selection is a small explicit parser, not a shell.** `journalctl -u UNIT -n
   100 --no-pager` accepts those three flags in any order; `journalctl -xe` is
@@ -288,7 +325,7 @@ Orchestration detail, not something a trainee needs to act on.
 ## Running it
 
 ```sh
-make up PROFILE=troubleshoot                         # seeded selection of all twelve
+make up PROFILE=troubleshoot                         # seeded selection of all fourteen
 # Or choose an exact, ordered subset:
 make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
@@ -297,9 +334,9 @@ make ssh
 - `PICK` names any non-empty subset and its exact order for this build
   (`--pick` in the generator). With `PICK` set, `SET` does not decide the count;
   the picked list does.
-- With no `PICK`, this profile defaults to `SET=12`, selecting all twelve
-  templates in seeded order. `SET=1` through `11` selects that many from the
-  pool; values outside 1–12 are rejected before the build. The terminal profile
+- With no `PICK`, this profile defaults to `SET=14`, selecting all fourteen
+  templates in seeded order. `SET=1` through `13` selects that many from the
+  pool; values outside 1–14 are rejected before the build. The terminal profile
   keeps its default `SET=8`.
 - `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
   corpus; the generator layer is keyed on the build arguments, so an unchanged
@@ -381,7 +418,7 @@ A stage is solved when `verify stage` prints its flag — not when the service
 - **Throwaway container.** Your edits live inside the container. `make down`
   removes it, so unrecorded work is gone; the completion record is the only
   thing that persists.
-- **Fixed pool.** There are twelve templates. Fixtures for commands the picked
+- **Fixed pool.** There are fourteen templates. Fixtures for commands the picked
   stages do not use are still shipped, but they print a neutral placeholder
   instead of scenario data.
 

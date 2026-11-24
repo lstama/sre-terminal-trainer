@@ -22,11 +22,12 @@ included), with a real 8/8 solve under Podman.
 - T07: Docker/Podman engine abstraction in the `Makefile` (`ENGINE`, auto-detected), docs
   updated, Podman 6.2.0 installed rootless, and both engines verified live.
   Details: `.agent/reports/T07-podman.md`.
-- Day 2: the `troubleshoot` profile has twelve templates (`svc-crashloop`,
+- Day 2: the `troubleshoot` profile has fourteen templates (`svc-crashloop`,
   `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`,
   `selinux-avc`, `port-conflict`, `oom-kill`, `image-pull`, `svc-selector`,
-  `resource-limits`). Diagnostic commands are mocked; reference ownership is
-  real image metadata. Details: `docs/troubleshooting.md`.
+  `resource-limits`, `tls-expiry`, `dependency-down`). Diagnostic commands are
+  mocked; reference ownership is real image metadata. Details:
+  `docs/troubleshooting.md`.
 - T26 (`feat/troubleshoot-wave3`): added `nginx-config` and `dns-mismatch`, expanded
   the default troubleshoot pool to six, and extended docs/smoke/self-test coverage.
   Docker verification includes a full two-stage SSH solve with both file repairs;
@@ -54,6 +55,13 @@ included), with a real 8/8 solve under Podman.
   each. Docker SSH solved both stages with both YAML repairs and saved one record;
   a default boot reports twelve stages. `make test` passes 111 verifier and 1,026
   troubleshoot assertions with a clean tree.
+- T37 (`feat/troubleshoot-wave7`): added `tls-expiry` and `dependency-down`,
+  expanded the default troubleshoot pool/SET to fourteen, and added associative
+  labelled status/journal/DNS/ping/nc fixture composition. All 16,383 non-empty
+  subsets passed in forward/reverse order (32,766 runs) with 32 fixtures each.
+  Docker SSH solved both stages with both config repairs and saved one record;
+  a default boot reports fourteen stages. Details:
+  `.agent/reports/T37-wave7-implementation.md`.
 
 ## Fixes landed in T05
 
@@ -111,7 +119,7 @@ other system configuration was changed.
   with `SSH_ASKPASS`+`setsid`, same `ssh` flags as `make ssh`): `id` → trainee,
   `verify next` prints the stage brief, `verify status`, `verify hint`, a wrong answer
   rejected with rc 1, a correct check accepted, `verify stage` produced
-  `FLAG{18882a3da581}`, `verify unlock` advanced to stage 2.
+  a stage flag, and `verify unlock` advanced to stage 2.
 - Full 8/8 solve as uid 1000 under Podman (seed 4242, order conf-hunt … deploy-error): 77
   asserted steps, 0 failures — every hash and file check (20 000-line line replacement,
   CRLF fix, config-drift restore, cut-paste reorder written byte-exact through stdin),

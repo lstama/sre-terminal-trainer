@@ -853,6 +853,7 @@ TROUBLESHOOT_IDS = [
     "svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
     "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict",
     "oom-kill", "image-pull", "svc-selector", "resource-limits",
+    "tls-expiry", "dependency-down",
 ]
 TROUBLESHOOT_TEMPLATES = {}
 
@@ -925,6 +926,28 @@ def merge_k8s_reports(left, right):
         current = []
         for line in text.rstrip("\n").splitlines():
             if line.startswith("# kubectl ") and current:
+                reports.add("\n".join(current).strip("\n"))
+                current = [line]
+            else:
+                current.append(line)
+        if current:
+            reports.add("\n".join(current).strip("\n"))
+    return "\n\n".join(sorted(reports)) + "\n"
+
+
+def merge_labelled_reports(left, right):
+    """Merge labelled command reports associatively without losing any evidence.
+
+    Status, journal, DNS, ping and nc fixtures can be requested by several
+    selected drills.  Each report starts with a ``# <command ...>`` line; parse
+    those boundaries rather than treating an already-merged fixture as one
+    opaque report.  Sorting makes the result independent of PICK order.
+    """
+    reports = set()
+    for text in (left, right):
+        current = []
+        for line in text.rstrip("\n").splitlines():
+            if line.startswith("# ") and current:
                 reports.add("\n".join(current).strip("\n"))
                 current = [line]
             else:
@@ -1061,7 +1084,8 @@ def t_svc_crashloop(rng, fs, fixtures, soft):
     ]) + "\n")
 
     # systemctl status carries the same error code as the journal.
-    put_fixture(fixtures, "systemctl_status.txt", "\n".join([
+    put_fixture_merged(fixtures, "systemctl_status.txt", "\n".join([
+        "# systemctl status %s" % unit,
         "* %s - %s demo service (troubleshoot pilot)" % (unit, svc),
         "     Loaded: loaded (%s; enabled; vendor preset: enabled)" % unit_path,
         "     Active: active (auto-restart) for 3min ago",
@@ -1071,7 +1095,7 @@ def t_svc_crashloop(rng, fs, fixtures, soft):
         "%s systemd[1]: %s: Main process exited, code=exited, status=1/FAILURE" % (ts(rng), unit),
         "%s %s[%d]: FATAL: startup aborted with error %s" % (ts(rng), agent, holder_pid + 1, err),
         "%s systemd[1]: %s: Failed with result 'exit-code'." % (ts(rng), unit),
-    ]) + "\n", "svc-crashloop")
+    ]) + "\n", "svc-crashloop", merge_labelled_reports)
 
     # Several thousand lines of journal, with repeated crash messages and two
     # clues: the reserved replacement port and the post-failover DB endpoint.
@@ -1103,9 +1127,11 @@ def t_svc_crashloop(rng, fs, fixtures, soft):
         else:
             journal.append(sys_line(rng))
     put_fixture_merged(fixtures, "journalctl_unit.txt",
-                       "-- unit %s --\n%s" % (unit, "\n".join(journal) + "\n"),
-                       "svc-crashloop", merge_reports)
+                       "# journalctl -u %s -n 100 --no-pager\n-- unit %s --\n%s"
+                       % (unit, unit, "\n".join(journal) + "\n"),
+                       "svc-crashloop", merge_labelled_reports)
     put_fixture_merged(fixtures, "journalctl_xe.txt", "\n".join([
+        "# journalctl -xe",
         "-- Boot 6f2c1d4e9a844b3c8b1e7d0a5f3c9d21 --",
         "-- unit %s --" % unit,
         "%s systemd[1]: %s: Main process exited, code=exited, status=1/FAILURE" % (ts(rng), unit),
@@ -1113,7 +1139,7 @@ def t_svc_crashloop(rng, fs, fixtures, soft):
         % (ts(rng), agent, holder_pid + 1, err, held_port),
         "%s systemd[1]: %s: Failed with result 'exit-code'." % (ts(rng), unit),
         "Hint: journalctl -u %s -n 100 --no-pager shows the full unit history." % unit,
-    ]) + "\n", "svc-crashloop", merge_reports)
+    ]) + "\n", "svc-crashloop", merge_labelled_reports)
     put_fixture_merged(fixtures, "ss_tlnp.txt", "\n".join([
         "State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process",
         'LISTEN  0       128     0.0.0.0:%-11d 0.0.0.0:*          users:(("%s",pid=%d,fd=%d))'
@@ -1625,6 +1651,309 @@ def t_resource_limits(rng, fs, fixtures, soft):
     return instr, hints, checks
 
 
+@troubleshoot_template("tls-expiry")
+def t_tls_expiry(rng, fs, fixtures, soft):
+    """TLS triage: the service loads an archived, expired certificate."""
+    svc = tok(rng, "tls", 6)
+    host = "%s.internal.example" % svc
+    service_ip = ip(rng)
+    cn = host
+    start_date = "2024-%02d-%02d" % (rng.randint(1, 12), rng.randint(1, 28))
+    expiry_date = "2025-%02d-%02d" % (rng.randint(1, 12), rng.randint(1, 28))
+    expiry_fragment = tok(rng, "exp", 8)
+    verify_fragment = tok(rng, "verify", 8)
+    expired_path = "/etc/ssl/%s/archive/expired-%s.crt" % (svc, hexs(rng, 8))
+    current_path = "/etc/ssl/%s/current/renewed-%s.crt" % (svc, hexs(rng, 8))
+    key_path = "/etc/ssl/%s/private/%s.key" % (svc, svc)
+    cfg = "/etc/%s/tls.conf" % svc
+
+    broken_lines = [
+        "# %s TLS configuration (managed by ops)" % svc,
+        "service_name = %s" % svc,
+        "server_name = %s" % host,
+        "listen_address = 0.0.0.0:443",
+        "certificate_file = %s" % expired_path,
+        "private_key_file = %s" % key_path,
+        "log_level = info",
+    ]
+    broken = "\n".join(broken_lines) + "\n"
+    fixed = broken.replace(expired_path, current_path)
+    wfile(fs, cfg, broken, mode=0o666)
+    wfile(fs, expired_path, "\n".join([
+        "# certificate fixture metadata; no live TLS is started",
+        "subject_CN = %s" % cn,
+        "notBefore = %s" % start_date,
+        "notAfter = %s" % expiry_date,
+        "status = expired",
+    ]) + "\n", mode=0o644)
+    wfile(fs, current_path, "\n".join([
+        "# certificate fixture metadata; no live TLS is started",
+        "subject_CN = %s" % cn,
+        "notBefore = 2026-01-01",
+        "notAfter = 2027-01-01",
+        "status = current",
+    ]) + "\n", mode=0o644)
+    wfile(fs, key_path, "# fixture-only key metadata; no live TLS is started\n", mode=0o600)
+
+    curl_v = "\n".join([
+        "# curl -v https://%s/" % host,
+        "*   Trying %s:443..." % service_ip,
+        "* Connected to %s (%s) port 443" % (host, service_ip),
+        "* ALPN: server accepted h2",
+        "* Server certificate:",
+        "*  subject: CN=%s" % cn,
+        "*  start date: %s 00:00:00 GMT" % start_date,
+        "*  expire date: %s 00:00:00 GMT" % expiry_date,
+        "*  subjectAltName: host \"%s\" matched cert's \"%s\"" % (host, cn),
+        "*  issuer: CN=%s" % host,
+        "*  SSL certificate verify failed: certificate has expired [%s]"
+        % verify_fragment,
+        "*  certificate expiry fragment: %s" % expiry_fragment,
+        "*  certificate verify detail: expired on %s" % expiry_date,
+        "*  certificate reference: %s" % current_path,
+        "* Closing connection 0",
+    ]) + "\n\n"
+    put_fixture_merged(fixtures, "curl_v.txt", curl_v,
+                       "tls-expiry", merge_curl_fixtures)
+    put_fixture_merged(fixtures, "curl_I.txt", "\n".join([
+        "# curl -I https://%s/" % host,
+        "curl: (60) SSL certificate problem: certificate has expired",
+        "curl: (60) certificate verify failed: expired on %s [%s]"
+        % (expiry_date, verify_fragment),
+        "requested host: %s" % host,
+    ]) + "\n\n", "tls-expiry", merge_curl_fixtures)
+    put_fixture_merged(fixtures, "dig.txt", "\n".join([
+        "# dig %s A" % host,
+        "; <<>> DiG 9.18.1 <<>> %s A" % host,
+        ";; global options: +cmd",
+        ";; Got answer:",
+        ";; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: %s" % hexs(rng, 4),
+        ";; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1",
+        "",
+        ";; QUESTION SECTION:",
+        ";%s. IN A" % host,
+        "",
+        ";; ANSWER SECTION:",
+        "%s. 60 IN A %s" % (host, service_ip),
+        "",
+        ";; Query time: 2 msec",
+        ";; SERVER: 10.0.0.53#53(10.0.0.53)",
+    ]) + "\n", "tls-expiry", merge_labelled_reports)
+    put_fixture_merged(fixtures, "nc_zv.txt", "\n".join([
+        "# nc -zv %s 443" % host,
+        "Connection to %s (%s) 443 port [tcp/https] succeeded!" % (host, service_ip),
+    ]) + "\n", "tls-expiry", merge_labelled_reports)
+
+    if expired_path == current_path or expired_path not in broken or current_path in broken:
+        raise AssertionError("tls-expiry: broken/correct certificate paths are inconsistent")
+    if fixed != broken.replace(expired_path, current_path) or fixed == broken:
+        raise AssertionError("tls-expiry: repair is not a certificate-path-only change")
+    if expiry_date >= "2026-01-01":
+        raise AssertionError("tls-expiry: generated certificate is not expired")
+    if cn not in curl_v or expiry_date not in curl_v or expiry_fragment not in curl_v:
+        raise AssertionError("tls-expiry: curl -v lacks certificate answer evidence")
+    if current_path not in curl_v or verify_fragment not in curl_v:
+        raise AssertionError("tls-expiry: curl -v lacks verification/reference clues")
+    if host not in fixtures["dig.txt"] or service_ip not in fixtures["dig.txt"]:
+        raise AssertionError("tls-expiry: DNS does not resolve the certificate host")
+    if "succeeded" not in fixtures["nc_zv.txt"] or host not in fixtures["nc_zv.txt"]:
+        raise AssertionError("tls-expiry: nc does not show the TLS port open")
+    if "certificate has expired" not in fixtures["curl_I.txt"]:
+        raise AssertionError("tls-expiry: curl -I lacks the certificate failure")
+
+    certificate_answer = "%s:%s:%s" % (cn, expiry_date, expiry_fragment)
+    checks = [
+        hash_check("tls-expiry-1", certificate_answer,
+                   "Submit the certificate CN, expiry date and expiry fragment from "
+                   "`curl -v`, joined by colons in that order (CN:YYYY-MM-DD:fragment)."),
+        hash_check("tls-expiry-2", current_path,
+                   "Submit the current certificate path revealed by the `curl -v` "
+                   "certificate reference line."),
+        file_check("tls-expiry-3", cfg, fixed, "certificate-" + svc,
+                   "Repair %s in place: change only `certificate_file` to the current "
+                   "certificate path revealed by `curl -v`." % cfg,
+                   initial=broken),
+    ]
+    instr = (
+        "An HTTPS service fails certificate verification even though DNS resolves its name "
+        "and the TCP port accepts connections. Inspect its TLS config at %s, then use "
+        "`curl -v <https-url>`, `curl -I <https-url>`, `dig <name> A` and "
+        "`nc -zv <host> 443` to separate name resolution and transport from certificate "
+        "validation. The verbose output names the certificate identity, expiry evidence "
+        "and a current certificate reference.\n\n"
+        "The checked config is %s. Its corrected end state is byte-for-byte the shipped "
+        "file with exactly one change: `certificate_file` becomes the current certificate "
+        "path named by the verbose evidence. Keep the server name, listener, key path, "
+        "comment and every other byte unchanged, and edit the file in place."
+        % (cfg, cfg)
+    )
+    hints = [
+        "Checklist: curl -v shows whether TCP connected before TLS verification failed; "
+        "read subject CN, expire date and the certificate expiry fragment in that report.",
+        "Checklist: dig confirms the requested name resolves and nc -zv confirms the port "
+        "is open; curl -I corroborates that certificate validation, not DNS or TCP, failed.",
+        "Checklist: the curl -v certificate reference names the current certificate file; "
+        "replace only certificate_file in nano, then Ctrl+O writes and Ctrl+X exits.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("dependency-down")
+def t_dependency_down(rng, fs, fixtures, soft):
+    """Application triage: a reachable dependency refuses the configured port."""
+    svc = tok(rng, "appsvc", 6)
+    app_host = "%s.internal.example" % svc
+    app_unit = svc + ".service"
+    dependency = tok(rng, "cache", 6)
+    dependency_unit = dependency + ".service"
+    dependency_process = dependency + "-server"
+    correct_host = "%s.internal.example" % dependency
+    wrong_host = "retired-%s.internal.example" % hexs(rng, 8)
+    correct_port = rng.randint(18000, 28999)
+    wrong_port = rng.randint(29000, 39999)
+    incident = tok(rng, "dep", 8)
+    app_ip = ip(rng)
+    dependency_ip = ip(rng)
+    cfg = "/etc/%s/%s.conf" % (svc, svc)
+
+    broken_lines = [
+        "# %s application configuration (managed by ops)" % svc,
+        "service_name = %s" % svc,
+        "dependency_unit = %s" % dependency_unit,
+        "dependency_host = %s" % wrong_host,
+        "dependency_port = %d" % wrong_port,
+        "connect_timeout_ms = 2500",
+        "retry_count = 3",
+        "log_level = warn",
+    ]
+    broken = "\n".join(broken_lines) + "\n"
+    fixed_lines = list(broken_lines)
+    fixed_lines[3] = "dependency_host = %s" % correct_host
+    fixed_lines[4] = "dependency_port = %d" % correct_port
+    fixed = "\n".join(fixed_lines) + "\n"
+    wfile(fs, cfg, broken, mode=0o666)
+
+    status = "\n".join([
+        "# systemctl status %s" % dependency_unit,
+        "* %s - %s dependency" % (dependency_unit, dependency),
+        "     Loaded: loaded (/etc/systemd/system/%s; enabled)" % dependency_unit,
+        "     Active: failed (Result: exit-code) since 4min ago",
+        "   Main PID: %d (code=exited, status=1/FAILURE)" % rng.randint(1200, 9000),
+        "",
+        "Environment=\"DEPENDENCY_HOST=%s\" \"DEPENDENCY_PORT=%d\""
+        % (correct_host, correct_port),
+        "%s %s[%d]: FATAL downstream listener unavailable; incident %s"
+        % (ts(rng), dependency_process, rng.randint(1200, 9000), incident),
+        "%s systemd[1]: %s: Failed with result 'exit-code'."
+        % (ts(rng), dependency_unit),
+    ]) + "\n"
+    put_fixture_merged(fixtures, "systemctl_status.txt", status,
+                       "dependency-down", merge_labelled_reports)
+    journal = "\n".join([
+        "# journalctl -u %s -n 100 --no-pager" % app_unit,
+        "-- unit %s --" % app_unit,
+        "%s %s[%d]: ERROR downstream %s at %s:%d failed: Connection refused"
+        % (ts(rng), svc, rng.randint(1200, 9000), dependency_unit,
+           wrong_host, wrong_port),
+        "%s %s[%d]: dependency incident %s; listener recovered on approved endpoint %s:%d"
+        % (ts(rng), svc, rng.randint(1200, 9000), incident,
+           correct_host, correct_port),
+        "%s systemd[1]: %s: Main process exited, code=exited, status=1/FAILURE"
+        % (ts(rng), app_unit),
+        "%s systemd[1]: %s: Failed with result 'exit-code'." % (ts(rng), app_unit),
+    ]) + "\n"
+    put_fixture_merged(fixtures, "journalctl_unit.txt", journal,
+                       "dependency-down", merge_labelled_reports)
+    put_fixture_merged(fixtures, "curl_v.txt", "\n".join([
+        "# curl -v http://%s:8080/" % app_host,
+        "*   Trying %s:8080..." % app_ip,
+        "< HTTP/1.1 502 Bad Gateway",
+        "< Server: %s" % svc,
+        "< X-Downstream-Unit: %s" % dependency_unit,
+        "< X-Downstream-Target: %s:%d" % (wrong_host, wrong_port),
+        "< Content-Length: 0",
+        "* Closing connection 0",
+    ]) + "\n\n", "dependency-down", merge_curl_fixtures)
+    put_fixture_merged(fixtures, "ss_tlnp.txt", "\n".join([
+        "State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process",
+        'LISTEN  0       128     0.0.0.0:%-11d 0.0.0.0:*          users:(("%s",pid=%d,fd=8))'
+        % (correct_port, dependency_process, rng.randint(1200, 9000)),
+        'LISTEN  0       128     127.0.0.1:22       0.0.0.0:*          users:(("sshd",pid=411,fd=3))',
+    ]) + "\n", "dependency-down", merge_ss_fixtures)
+    put_fixture_merged(fixtures, "ping.txt", "\n".join([
+        "# ping %s" % correct_host,
+        "PING %s (%s) 56(84) bytes of data." % (correct_host, dependency_ip),
+        "64 bytes from %s (%s): icmp_seq=1 ttl=62 time=2.4 ms"
+        % (correct_host, dependency_ip),
+        "64 bytes from %s (%s): icmp_seq=2 ttl=62 time=2.1 ms"
+        % (correct_host, dependency_ip),
+        "",
+        "--- %s ping statistics ---" % correct_host,
+        "2 packets transmitted, 2 received, 0% packet loss, time 1001ms",
+    ]) + "\n", "dependency-down", merge_labelled_reports)
+
+    if correct_host == wrong_host or correct_port == wrong_port:
+        raise AssertionError("dependency-down: correct/wrong endpoints are not distinct")
+    if wrong_host not in broken or correct_host in broken \
+            or str(wrong_port) not in broken or str(correct_port) in broken:
+        raise AssertionError("dependency-down: broken config does not contain only the wrong endpoint")
+    if fixed != broken.replace(wrong_host, correct_host).replace(
+            "dependency_port = %d" % wrong_port,
+            "dependency_port = %d" % correct_port) or fixed == broken:
+        raise AssertionError("dependency-down: repair is not exactly host plus port")
+    if incident not in status or incident not in journal or dependency_unit not in status:
+        raise AssertionError("dependency-down: unit/fragment evidence is missing")
+    if "Connection refused" not in journal or wrong_host not in journal \
+            or str(wrong_port) not in journal:
+        raise AssertionError("dependency-down: journal does not show the refused configured endpoint")
+    if correct_host not in journal or str(correct_port) not in journal:
+        raise AssertionError("dependency-down: journal does not reveal the approved endpoint")
+    if str(correct_port) not in fixtures["ss_tlnp.txt"] \
+            or str(wrong_port) in fixtures["ss_tlnp.txt"]:
+        raise AssertionError("dependency-down: ss evidence has the wrong listening-port state")
+    if "502 Bad Gateway" not in fixtures["curl_v.txt"]:
+        raise AssertionError("dependency-down: curl evidence lacks the application's 502")
+    if correct_host not in fixtures["ping.txt"] or "0% packet loss" not in fixtures["ping.txt"]:
+        raise AssertionError("dependency-down: ping does not corroborate dependency reachability")
+
+    dependency_answer = "%s:%s" % (dependency_unit, incident)
+    checks = [
+        hash_check("dependency-down-1", dependency_answer,
+                   "Submit the dependency unit name and incident fragment, joined by a "
+                   "colon (unit first), as shown by systemctl status and journalctl -u."),
+        hash_check("dependency-down-2", str(correct_port),
+                   "Submit the dependency's listening port from `ss -tlnp`, corroborated "
+                   "by the approved endpoint in the status/journal evidence.",
+                   plain=str(correct_port)),
+        file_check("dependency-down-3", cfg, fixed, "dependency-" + svc,
+                   "Repair %s in place: change only `dependency_host` and `dependency_port` "
+                   "to the approved dependency endpoint revealed by the evidence." % cfg,
+                   initial=broken),
+    ]
+    instr = (
+        "The application unit %s returns 502 because its downstream dependency refuses the "
+        "configured connection. Use `systemctl status <dependency-unit>`, "
+        "`journalctl -u %s -n 100 --no-pager`, `curl -v <app-url>` and `ss -tlnp` to "
+        "identify the failed dependency, its incident fragment, the refused configured "
+        "endpoint and the approved listening endpoint. Use `ping <dependency-host>` to "
+        "confirm host reachability separately from service availability.\n\n"
+        "The checked config is %s. Its corrected end state is byte-for-byte the shipped "
+        "file with exactly two changes: `dependency_host` and `dependency_port` become the "
+        "approved dependency endpoint. Keep the dependency unit, service name, timeout, "
+        "retry count, log level and every other byte unchanged, and edit the file in place."
+        % (app_unit, app_unit, cfg)
+    )
+    hints = [
+        "Checklist: systemctl status shows the failed dependency unit, environment and "
+        "incident fragment; journalctl -u shows the application's Connection refused.",
+        "Checklist: curl -v exposes the application's 502 and downstream target; ss -tlnp "
+        "shows which dependency port is actually listening, and ping tests host reachability.",
+        "Checklist: edit only dependency_host and dependency_port in nano to the approved "
+        "endpoint; Ctrl+O writes in place and Ctrl+X exits.",
+    ]
+    return instr, hints, checks
+
+
 @troubleshoot_template("disk-full")
 def t_disk_full(rng, fs, fixtures, soft):
     """Resource exhaustion triage: a full filesystem, a runaway log directory
@@ -2041,7 +2370,8 @@ def t_dns_mismatch(rng, fs, fixtures, soft):
 
     # The canonical service hostname is the DNS owner/query name.  Its current
     # CNAME target is the stale backend hard-coded into the app config.
-    put_fixture(fixtures, "dig.txt", "\n".join([
+    put_fixture_merged(fixtures, "dig.txt", "\n".join([
+        "# dig %s A" % correct_host,
         "; <<>> DiG 9.18.1 <<>> %s A" % correct_host,
         ";; global options: +cmd",
         ";; Got answer:",
@@ -2059,7 +2389,7 @@ def t_dns_mismatch(rng, fs, fixtures, soft):
         ";; SERVER: 10.0.0.53#53(10.0.0.53)",
         ";; WHEN: %s" % ts(rng),
         ";; MSG SIZE  rcvd: %d" % rng.randint(80, 140),
-    ]) + "\n", "dns-mismatch")
+    ]) + "\n", "dns-mismatch", merge_labelled_reports)
     put_fixture(fixtures, "nslookup.txt", "\n".join([
         "Server:        10.0.0.53",
         "Address:       10.0.0.53#53",
@@ -2069,7 +2399,8 @@ def t_dns_mismatch(rng, fs, fixtures, soft):
         "Name:   %s" % wrong_host,
         "Address: %s" % wrong_ip,
     ]) + "\n", "dns-mismatch")
-    put_fixture(fixtures, "curl_I.txt", "\n".join([
+    put_fixture_merged(fixtures, "curl_I.txt", "\n".join([
+        "# curl -I http://%s:%d/v1" % (wrong_host, backend_port),
         "HTTP/1.1 502 Bad Gateway",
         "Server: %s" % response_fragment,
         "Date: %s" % ts(rng),
@@ -2077,7 +2408,7 @@ def t_dns_mismatch(rng, fs, fixtures, soft):
         "X-Upstream: %s:%d" % (wrong_ip, backend_port),
         "Content-Length: 0",
         "Connection: keep-alive",
-    ]) + "\n", "dns-mismatch")
+    ]) + "\n\n", "dns-mismatch", merge_curl_fixtures)
     put_fixture_merged(fixtures, "curl_v.txt", "\n".join([
         "# curl -v http://%s:%d/v1" % (wrong_host, backend_port),
         "*   Trying %s:%d..." % (wrong_ip, backend_port),
@@ -2086,7 +2417,8 @@ def t_dns_mismatch(rng, fs, fixtures, soft):
         "* connection %s: refused" % connection_fragment,
         "* Closing connection 0",
     ]) + "\n\n", "dns-mismatch", merge_curl_fixtures)
-    put_fixture(fixtures, "ping.txt", "\n".join([
+    put_fixture_merged(fixtures, "ping.txt", "\n".join([
+        "# ping %s" % wrong_host,
         "PING %s (%s) 56(84) bytes of data." % (wrong_host, wrong_ip),
         "64 bytes from %s (%s): icmp_seq=1 ttl=62 time=2.4 ms"
         % (wrong_host, wrong_ip),
@@ -2095,12 +2427,13 @@ def t_dns_mismatch(rng, fs, fixtures, soft):
         "",
         "--- %s ping statistics ---" % wrong_host,
         "2 packets transmitted, 2 received, 0% packet loss, time 1001ms",
-    ]) + "\n", "dns-mismatch")
-    put_fixture(fixtures, "nc_zv.txt", "\n".join([
+    ]) + "\n", "dns-mismatch", merge_labelled_reports)
+    put_fixture_merged(fixtures, "nc_zv.txt", "\n".join([
+        "# nc -zv %s %d" % (wrong_host, backend_port),
         "nc: connect to %s (%s) port %d (tcp) failed: Connection refused"
         % (wrong_host, wrong_ip, backend_port),
         "connection %s: refused" % connection_fragment,
-    ]) + "\n", "dns-mismatch")
+    ]) + "\n", "dns-mismatch", merge_labelled_reports)
 
     if correct_host == wrong_host or wrong_host not in broken or correct_host in broken:
         raise AssertionError("dns-mismatch: canonical/stale endpoint state inconsistent")
@@ -2411,6 +2744,7 @@ def t_oom_kill(rng, fs, fixtures, soft):
     wfile(fs, cfg, broken, mode=0o666)
 
     journal = "\n".join([
+        "# journalctl -u %s -n 100 --no-pager" % unit,
         "-- unit %s --" % unit,
         "%s kernel: Out of memory: Killed process %d (%s) total-vm:%d kB, "
         "anon-rss:%d kB, file-rss:%d kB, shmem-rss:0 kB, UID:1000"
@@ -2426,9 +2760,11 @@ def t_oom_kill(rng, fs, fixtures, soft):
         "%s systemd[1]: %s: Failed with result 'signal'." % (ts(rng), unit),
     ]) + "\n"
     put_fixture_merged(fixtures, "journalctl_unit.txt", journal,
-                       "oom-kill", merge_reports)
-    put_fixture_merged(fixtures, "journalctl_xe.txt", journal,
-                       "oom-kill", merge_reports)
+                       "oom-kill", merge_labelled_reports)
+    put_fixture_merged(fixtures, "journalctl_xe.txt",
+                       journal.replace("# journalctl -u %s -n 100 --no-pager" % unit,
+                                       "# journalctl -xe", 1),
+                       "oom-kill", merge_labelled_reports)
 
     put_fixture_merged(fixtures, "free_m.txt", "# snapshot oom-kill\n" + "\n".join([
         "               total        used        free      shared  buff/cache   available",
@@ -2805,7 +3141,7 @@ def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
 # ---------------------------------------------------------------------------
 
 def self_test(seeds, verbose=True):
-    """Generate a full 16-stage terminal set *and* the 12-stage troubleshoot set
+    """Generate a full 16-stage terminal set *and* the 14-stage troubleshoot set
     per seed, then cross-foot every answer against the artefacts on disk.
 
     The templates assert their own load-bearing invariants while generating (e.g.
@@ -2814,7 +3150,7 @@ def self_test(seeds, verbose=True):
     order, file checks not shipped pre-solved, no answer dump under ``fs/``, the
     two drill-specific claims (top talker, config-drift baseline token), and for
     troubleshoot: the full 32-fixture contract, broken initial files, and
-    scenario-specific clue placement, including both wave-six drills.
+    scenario-specific clue placement across all fourteen drills.
     """
     import re
     import tempfile
@@ -2945,7 +3281,7 @@ def self_test(seeds, verbose=True):
                 check("answers.json" not in filenames,
                       "seed %d: answers.json leaked into %s" % (seed, dirpath))
 
-            # ---- troubleshoot profile: all twelve templates, all 32 fixtures ----
+            # ---- troubleshoot profile: all fourteen templates, all 32 fixtures ----
             with tempfile.TemporaryDirectory(prefix="sre-selftest-ts.") as ts_tmp:
                 ts_dump_path = os.path.join(ts_tmp, "answers.json")
                 ts_stages, ts_order, ts_final = write_outputs(
@@ -3483,6 +3819,118 @@ def self_test(seeds, verbose=True):
                           "seed %d: image-pull instruction omits its command checklist" % seed)
                     check(image_ans[0] not in image_instr and image_ans[1] not in image_instr,
                           "seed %d: image-pull instruction reveals a hash answer" % seed)
+                if "tls-expiry" in ts_order:
+                    with open(os.path.join(ts_fixtures, "curl_v.txt"), encoding="utf-8") as fh:
+                        tls_curl = fh.read()
+                    with open(os.path.join(ts_fixtures, "curl_I.txt"), encoding="utf-8") as fh:
+                        tls_head = fh.read()
+                    with open(os.path.join(ts_fixtures, "dig.txt"), encoding="utf-8") as fh:
+                        tls_dig = fh.read()
+                    with open(os.path.join(ts_fixtures, "nc_zv.txt"), encoding="utf-8") as fh:
+                        tls_nc = fh.read()
+                    tls_checks = ts_dump["stages"]["tls-expiry"]["checks"]
+                    tls_ans = [c["answer"] for c in tls_checks]
+                    tls_cfg = os.path.join(ts_fs, tls_checks[2]["path"].lstrip("/"))
+                    with open(tls_cfg, encoding="utf-8") as fh:
+                        tls_broken = fh.read()
+                    tls_parts = tls_ans[0].split(":", 2)
+                    tls_cn = tls_parts[0] if len(tls_parts) == 3 else ""
+                    tls_date = tls_parts[1] if len(tls_parts) == 3 else ""
+                    tls_exp_fragment = tls_parts[2] if len(tls_parts) == 3 else ""
+                    old_match = re.search(r"^certificate_file = (.+)$", tls_broken, re.MULTILINE)
+                    old_path = old_match.group(1) if old_match else ""
+                    tls_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                          % ts_dump["stages"]["tls-expiry"]["index"])
+                    with open(os.path.join(tls_sd, "instruction"), encoding="utf-8") as fh:
+                        tls_instr = fh.read()
+                    with open(os.path.join(tls_sd, "hint"), encoding="utf-8") as fh:
+                        tls_hint = fh.read()
+                    check(bool(tls_cn) and ("subject: CN=" + tls_cn) in tls_curl
+                          and ("expire date: " + tls_date) in tls_curl
+                          and ("certificate expiry fragment: " + tls_exp_fragment) in tls_curl
+                          and "certificate has expired" in tls_curl
+                          and "certificate has expired" in tls_head,
+                          "seed %d: TLS curl evidence lacks CN/date/fragment or expiry failure" % seed)
+                    check(bool(old_path) and old_path != tls_ans[1]
+                          and tls_ans[1] in tls_curl
+                          and tls_ans[2] == tls_broken.replace(old_path, tls_ans[1]),
+                          "seed %d: TLS repair/reference path is inconsistent" % seed)
+                    check(tls_cn in tls_dig and " IN A " in tls_dig
+                          and tls_cn in tls_nc and "succeeded" in tls_nc,
+                          "seed %d: TLS DNS/open-port evidence is incomplete" % seed)
+                    check(all(command in tls_instr for command in
+                              ("curl -v", "curl -I", "dig", "nc -zv")),
+                          "seed %d: TLS instruction omits its command checklist" % seed)
+                    check(tls_ans[0] not in tls_instr and tls_ans[1] not in tls_instr
+                          and tls_ans[0] not in tls_hint and tls_ans[1] not in tls_hint,
+                          "seed %d: TLS instruction/hints reveal an answer" % seed)
+                if "dependency-down" in ts_order:
+                    with open(os.path.join(ts_fixtures, "systemctl_status.txt"),
+                              encoding="utf-8") as fh:
+                        dep_status = fh.read()
+                    with open(os.path.join(ts_fixtures, "journalctl_unit.txt"),
+                              encoding="utf-8") as fh:
+                        dep_journal = fh.read()
+                    with open(os.path.join(ts_fixtures, "ss_tlnp.txt"), encoding="utf-8") as fh:
+                        dep_ss = fh.read()
+                    with open(os.path.join(ts_fixtures, "curl_v.txt"), encoding="utf-8") as fh:
+                        dep_curl = fh.read()
+                    with open(os.path.join(ts_fixtures, "ping.txt"), encoding="utf-8") as fh:
+                        dep_ping = fh.read()
+                    dep_checks = ts_dump["stages"]["dependency-down"]["checks"]
+                    dep_ans = [c["answer"] for c in dep_checks]
+                    dep_cfg = os.path.join(ts_fs, dep_checks[2]["path"].lstrip("/"))
+                    with open(dep_cfg, encoding="utf-8") as fh:
+                        dep_broken = fh.read()
+                    dep_unit, _, dep_fragment = dep_ans[0].partition(":")
+                    wrong_host_match = re.search(r"^dependency_host = (.+)$", dep_broken,
+                                                 re.MULTILINE)
+                    wrong_port_match = re.search(r"^dependency_port = (\d+)$", dep_broken,
+                                                 re.MULTILINE)
+                    correct_host_match = re.search(r"^dependency_host = (.+)$", dep_ans[2],
+                                                   re.MULTILINE)
+                    correct_port_match = re.search(r"^dependency_port = (\d+)$", dep_ans[2],
+                                                   re.MULTILINE)
+                    wrong_host = wrong_host_match.group(1) if wrong_host_match else ""
+                    wrong_port = wrong_port_match.group(1) if wrong_port_match else ""
+                    correct_host = correct_host_match.group(1) if correct_host_match else ""
+                    correct_port = correct_port_match.group(1) if correct_port_match else ""
+                    dep_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                          % ts_dump["stages"]["dependency-down"]["index"])
+                    with open(os.path.join(dep_sd, "instruction"), encoding="utf-8") as fh:
+                        dep_instr = fh.read()
+                    with open(os.path.join(dep_sd, "hint"), encoding="utf-8") as fh:
+                        dep_hint = fh.read()
+                    check(bool(dep_unit) and "Active: failed" in dep_status
+                          and dep_unit in dep_status and dep_fragment in dep_status
+                          and dep_unit in dep_journal and dep_fragment in dep_journal,
+                          "seed %d: dependency unit/fragment evidence is incomplete" % seed)
+                    check("Connection refused" in dep_journal and wrong_host in dep_journal
+                          and wrong_port in dep_journal and correct_host in dep_journal
+                          and dep_ans[1] in dep_journal,
+                          "seed %d: dependency refused/approved endpoint clues are incomplete" % seed)
+                    check(bool(correct_port) and correct_port == dep_ans[1]
+                          and correct_port != wrong_port and correct_port in dep_ss
+                          and wrong_port not in dep_ss,
+                          "seed %d: dependency ss listening-port evidence is inconsistent" % seed)
+                    check("502 Bad Gateway" in dep_curl and dep_unit in dep_curl
+                          and correct_host in dep_ping and "0% packet loss" in dep_ping,
+                          "seed %d: dependency curl/ping evidence is incomplete" % seed)
+                    expected_dep = dep_broken.replace(
+                        "dependency_host = " + wrong_host,
+                        "dependency_host = " + correct_host).replace(
+                        "dependency_port = " + wrong_port,
+                        "dependency_port = " + correct_port)
+                    check(dep_ans[2] == expected_dep and dep_ans[2] != dep_broken,
+                          "seed %d: dependency repair is not exactly host plus port" % seed)
+                    check(all(command in dep_instr for command in
+                              ("systemctl status", "journalctl -u", "curl -v", "ss -tlnp")),
+                          "seed %d: dependency instruction omits its command checklist" % seed)
+                    check(dep_ans[0] not in dep_instr and correct_host not in dep_instr
+                          and ("dependency_port = " + dep_ans[1]) not in dep_instr
+                          and dep_ans[0] not in dep_hint and correct_host not in dep_hint
+                          and ("dependency_port = " + dep_ans[1]) not in dep_hint,
+                          "seed %d: dependency instruction/hints reveal an answer" % seed)
 
                 if verbose:
                     print("selftest seed %d: troubleshoot %d stages + %d fixtures checked"
