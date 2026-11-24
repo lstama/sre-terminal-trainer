@@ -22,11 +22,11 @@ included), with a real 8/8 solve under Podman.
 - T07: Docker/Podman engine abstraction in the `Makefile` (`ENGINE`, auto-detected), docs
   updated, Podman 6.2.0 installed rootless, and both engines verified live.
   Details: `.agent/reports/T07-podman.md`.
-- Day 2: the `troubleshoot` profile has ten templates (`svc-crashloop`,
+- Day 2: the `troubleshoot` profile has twelve templates (`svc-crashloop`,
   `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`,
-  `selinux-avc`, `port-conflict`, `oom-kill`, `image-pull`). Diagnostic commands
-  are mocked; reference ownership is real image metadata. Details:
-  `docs/troubleshooting.md`.
+  `selinux-avc`, `port-conflict`, `oom-kill`, `image-pull`, `svc-selector`,
+  `resource-limits`). Diagnostic commands are mocked; reference ownership is
+  real image metadata. Details: `docs/troubleshooting.md`.
 - T26 (`feat/troubleshoot-wave3`): added `nginx-config` and `dns-mismatch`, expanded
   the default troubleshoot pool to six, and extended docs/smoke/self-test coverage.
   Docker verification includes a full two-stage SSH solve with both file repairs;
@@ -47,6 +47,13 @@ included), with a real 8/8 solve under Podman.
   30 fixtures each. Docker SSH solved both stages with both repairs and saved one
   record; a default boot reports ten stages. `make test` passes 111 verifier and
   710 troubleshoot assertions with a clean tree.
+- T35 (`feat/troubleshoot-wave6`): added `svc-selector` and `resource-limits`,
+  expanded the default troubleshoot pool/SET to twelve and the fixture contract
+  to 32, and added canonical shared-Kubernetes evidence composition. All 4,095
+  non-empty subsets passed in forward/reverse order (8,190 runs) with 32 fixtures
+  each. Docker SSH solved both stages with both YAML repairs and saved one record;
+  a default boot reports twelve stages. `make test` passes 111 verifier and 1,026
+  troubleshoot assertions with a clean tree.
 
 ## Fixes landed in T05
 

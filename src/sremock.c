@@ -82,6 +82,12 @@ static int kubectl_fixture(int argc, char **argv, const char **fixture)
         *fixture = "kubectl_get_pods.txt";
         return 1;
     }
+    if ((is_arg(argv[2], "svc") || is_arg(argv[2], "endpoints"))
+        && (argc == 3 || (argc == 4 && nonempty(argv[3])))) {
+        *fixture = is_arg(argv[2], "svc")
+            ? "kubectl_get_svc.txt" : "kubectl_get_endpoints.txt";
+        return 1;
+    }
     if (is_arg(argv[2], "events") && argc == 3) {
         *fixture = "kubectl_get_events.txt";
         return 1;

@@ -8,7 +8,7 @@
 # paths and byte-for-byte passthrough.
 #
 # Part 2 (runs when the generator has --profile support): generate the default
-# ten-template pool and ordered PICK subsets, then assert the fixture contract,
+# twelve-template pool and ordered PICK subsets, then assert the fixture contract,
 # manifests, checks.tsv shape, stage/final flag recomputation, generated scenario
 # clues and that no file check ships already solved. If the generator has no
 # troubleshoot profile yet, part 2 is reported as pending (a SKIP, not a failure).
@@ -136,6 +136,16 @@ EOF
 cat >"$FIX/kubectl_get_pods.txt" <<'EOF'
 NAME                          READY   STATUS             RESTARTS   AGE
 demo-aaaa-bbbb                0/1     CrashLoopBackOff   7          42m
+EOF
+
+cat >"$FIX/kubectl_get_svc.txt" <<'EOF'
+NAME          TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)   AGE   SELECTOR
+demo-service  ClusterIP   10.0.0.20    <none>        80/TCP    7m    app=demo
+EOF
+
+cat >"$FIX/kubectl_get_endpoints.txt" <<'EOF'
+NAME          ENDPOINTS   AGE
+demo-service  <none>      7m
 EOF
 
 cat >"$FIX/kubectl_describe_pod.txt" <<'EOF'
@@ -295,6 +305,13 @@ expect_reject "journalctl -u with a missing value is rejected" 'unsupported invo
 
 printf '\n== kubectl ==\n'
 expect_fixture "kubectl get pods -> kubectl_get_pods.txt" kubectl_get_pods.txt kubectl get pods
+expect_fixture "kubectl get svc -> kubectl_get_svc.txt" kubectl_get_svc.txt kubectl get svc
+expect_fixture "kubectl get svc NAME -> kubectl_get_svc.txt" kubectl_get_svc.txt \
+    kubectl get svc demo-service
+expect_fixture "kubectl get endpoints -> kubectl_get_endpoints.txt" \
+    kubectl_get_endpoints.txt kubectl get endpoints
+expect_fixture "kubectl get endpoints NAME -> kubectl_get_endpoints.txt" \
+    kubectl_get_endpoints.txt kubectl get endpoints demo-service
 expect_fixture "kubectl get events -> kubectl_get_events.txt" kubectl_get_events.txt \
     kubectl get events
 expect_fixture "kubectl get configmap NAME -> kubectl_get_configmap.txt" \
@@ -306,6 +323,10 @@ expect_fixture "kubectl describe pod NAME -> kubectl_describe_pod.txt" \
 expect_fixture "kubectl logs POD -> kubectl_logs.txt" kubectl_logs.txt kubectl logs demo-aaaa-bbbb
 expect_reject "kubectl get pods with an extra argument is rejected" \
     'unsupported invocation' kubectl get pods --all-namespaces
+expect_reject "kubectl get svc with extra arguments is rejected" \
+    'unsupported invocation' kubectl get svc demo --watch
+expect_reject "kubectl get endpoints with extra arguments is rejected" \
+    'unsupported invocation' kubectl get endpoints demo --watch
 expect_reject "kubectl get configmap without a name is rejected" \
     'unsupported invocation' kubectl get configmap
 expect_reject "kubectl apply is not implemented" 'unsupported invocation' \
@@ -425,12 +446,13 @@ FIXTURES = [
     "ausearch_avc.txt", "dig.txt", "nslookup.txt", "ping.txt", "nc_zv.txt",
     "docker_ps_a.txt", "docker_logs.txt", "docker_inspect.txt",
     "podman_ps_a.txt", "podman_logs.txt", "podman_inspect.txt",
-    "kubectl_get_pods.txt", "kubectl_describe_pod.txt", "kubectl_logs.txt",
-    "kubectl_get_events.txt", "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
+    "kubectl_get_pods.txt", "kubectl_get_svc.txt", "kubectl_get_endpoints.txt",
+    "kubectl_describe_pod.txt", "kubectl_logs.txt", "kubectl_get_events.txt",
+    "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
 ]
 POOL = ["svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
         "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict",
-        "oom-kill", "image-pull"]
+        "oom-kill", "image-pull", "svc-selector", "resource-limits"]
 NEUTRAL = "no data for this scenario\n"
 PICK = pick_arg.split(",") if pick_arg else None
 expected_count = len(PICK) if PICK else len(POOL)
@@ -442,6 +464,8 @@ extra = [n for n in present if n not in FIXTURES]
 emit(not missing and not extra and len(present) == len(FIXTURES),
      "fixtures/ holds exactly the %d contracted files" % len(FIXTURES),
      "missing=%s extra=%s" % (missing, extra))
+emit(all("%%" not in fixture(name) for name in FIXTURES),
+     "no fixture contains a literal double percent")
 
 with open(answers_path, encoding="utf-8") as fh:
     dump = json.load(fh)
@@ -462,7 +486,7 @@ if PICK:
 else:
     emit(len(stage_lines) == len(POOL) and len(set(stage_lines)) == len(POOL)
          and set(stage_lines) == set(POOL),
-         "default generation selects each of the ten templates exactly once",
+         "default generation selects each of the twelve templates exactly once",
          repr(stage_lines))
     emit(dump.get("order") == stage_lines,
          "answers dump order matches the default manifest order", repr(dump.get("order")))
@@ -557,6 +581,117 @@ for index, sid in enumerate(stage_lines, 1):
              and ("reserved replacement port is " + svc_free.group(1))
              in fixture("journalctl_unit.txt"),
              "svc-crashloop: journal retains its reserved free-port clue")
+
+    if sid == "k8s-crashloop":
+        k8s_checks = dumped
+        pod_reason, missing_key = k8s_checks[0]["answer"], k8s_checks[1]["answer"]
+        k8s_pod = pod_reason.split(":", 1)[0]
+        actual_key_match = re.search(r"^\s+key: (\S+)$", k8s_checks[2]["answer"],
+                                     re.MULTILINE)
+        actual_key = actual_key_match.group(1) if actual_key_match else ""
+        pods_text = fixture("kubectl_get_pods.txt")
+        describe = fixture("kubectl_describe_pod.txt")
+        logs = fixture("kubectl_logs.txt")
+        events = fixture("kubectl_get_events.txt")
+        deploy = fixture("kubectl_get_deploy.txt")
+        emit(k8s_pod in pods_text and pod_reason.split(":", 1)[1] in logs
+             and missing_key in logs and actual_key
+             in fixture("kubectl_get_configmap.txt"),
+             "k8s-crashloop: merged pod/log/configmap fixtures retain its clues")
+        emit(k8s_pod in describe and k8s_pod in events
+             and os.path.basename(k8s_checks[2]["path"])[:-5] in deploy,
+             "k8s-crashloop: merged describe/event/deploy fixtures retain its pod")
+
+    if sid == "svc-selector":
+        svc_checks = dumped
+        service = svc_checks[0]["answer"]
+        mismatch = svc_checks[1]["answer"]
+        checked_path = svc_checks[2]["path"]
+        fixed_text = svc_checks[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        svc_text = fixture("kubectl_get_svc.txt")
+        endpoints = fixture("kubectl_get_endpoints.txt")
+        events = fixture("kubectl_get_events.txt")
+        curl = fixture("curl_v.txt")
+        service_row = next((line for line in svc_text.splitlines()
+                            if re.match(r"^" + re.escape(service) + r"\s", line)), "")
+        fields = service_row.split()
+        selector_match = re.search(r"app=([^\s]+)", service_row)
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "svc-selector: two hash checks precede the file check")
+        emit(bool(fields) and "ClusterIP" in fields and selector_match is not None
+             and selector_match.group(1) == service,
+             "svc-selector: get svc names the checked Service and its selector")
+        emit(mismatch in endpoints and mismatch in events and "<none>" in endpoints
+             and "EndpointsNotFound" in events,
+             "svc-selector: endpoint/event evidence shares the mismatch fragment")
+        emit(len(fields) >= 5 and fields[2] in curl
+             and fields[4].split("/", 1)[0] in curl and "Connection refused" in curl,
+             "svc-selector: curl refuses the Service cluster address")
+        expected_fixed = initial_text.replace(
+            "      labels:\n", "      labels:\n        app: %s\n" % service)
+        emit("        app: %s" % service not in initial_text
+             and fixed_text == expected_fixed and fixed_text != initial_text,
+             "svc-selector: repair adds only the missing Service-selector pod label")
+        emit(all(command in instruction for command in
+                 ("kubectl get svc", "kubectl get endpoints", "kubectl get events",
+                  "kubectl describe pod", "kubectl get deploy", "curl -v")),
+             "svc-selector: instruction teaches the Service triage checklist")
+        emit(service not in instruction and mismatch not in instruction
+             and service not in hint_text and mismatch not in hint_text,
+             "svc-selector: instruction and hints do not reveal answers")
+
+    if sid == "resource-limits":
+        limit_checks = dumped
+        pod = limit_checks[0]["answer"]
+        oom_fragment = limit_checks[1]["answer"]
+        checked_path = limit_checks[2]["path"]
+        fixed_text = limit_checks[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        pods_text = fixture("kubectl_get_pods.txt")
+        describe = fixture("kubectl_describe_pod.txt")
+        events = fixture("kubectl_get_events.txt")
+        logs = fixture("kubectl_logs.txt")
+        pod_row = next((line for line in pods_text.splitlines()
+                        if re.match(r"^" + re.escape(pod) + r"\s", line)), "")
+        memory_match = re.search(r"^              memory: (\S+)$", fixed_text, re.MULTILINE)
+        memory_limit = memory_match.group(1) if memory_match else ""
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "resource-limits: two hash checks precede the file check")
+        emit(bool(pod_row) and "CrashLoopBackOff" in pod_row and pod in describe,
+             "resource-limits: pod table/description identify the checked pod")
+        emit("QoS Class:        BestEffort" in describe
+             and "Limits:        <none>" in describe and "OOMKilled" in describe,
+             "resource-limits: description shows BestEffort, no limits and OOMKilled")
+        emit(oom_fragment in events and oom_fragment in describe and oom_fragment in logs
+             and "OOMKilling" in events,
+             "resource-limits: OOM fragment is shared by events, description and logs")
+        emit(bool(memory_limit) and memory_limit in events and memory_limit in describe
+             and memory_limit in logs,
+             "resource-limits: fixtures reveal the exact repaired memory limit")
+        image_line = "          image: registry.example/batch-worker:3.4.1"
+        expected_lines = initial_text.splitlines()
+        image_index = expected_lines.index(image_line)
+        expected_lines[image_index + 1:image_index + 1] = [
+            "          resources:", "            limits:",
+            "              memory: %s" % memory_limit,
+        ]
+        emit("resources:" not in initial_text
+             and fixed_text == "\n".join(expected_lines) + "\n",
+             "resource-limits: repair inserts only the missing resource block")
+        emit(all(command in instruction for command in
+                 ("kubectl get pods", "kubectl describe pod", "kubectl get events",
+                  "kubectl logs", "kubectl get deploy")),
+             "resource-limits: instruction teaches the Kubernetes resource checklist")
+        emit(pod not in instruction and oom_fragment not in instruction
+             and (not memory_limit or memory_limit not in instruction)
+             and pod not in hint_text and oom_fragment not in hint_text
+             and (not memory_limit or memory_limit not in hint_text),
+             "resource-limits: instruction and hints do not reveal answers")
 
     if sid == "disk-full":
         df_text = fixture("df_h.txt")
@@ -966,7 +1101,7 @@ PY
         fi
     }
 
-    run_generator_case "default ten-template troubleshoot generation" default 10
+    run_generator_case "default twelve-template troubleshoot generation" default 12
     run_generator_case "original two-template PICK" pilot-pick 2 \
         svc-crashloop,k8s-crashloop
     # A reversed, non-pool order and a deliberately different SET prove PICK
@@ -985,6 +1120,28 @@ PY
         oom-kill,image-pull
     run_generator_case "wave-five PICK in reversed order" wave5-reversed 10 \
         image-pull,oom-kill
+    run_generator_case "wave-six two-template PICK" wave6-pick 1 \
+        svc-selector,resource-limits
+    run_generator_case "wave-six PICK in reversed order" wave6-reversed 12 \
+        resource-limits,svc-selector
+    run_generator_case "mixed Kubernetes PICK" wave6-mixed 1 \
+        resource-limits,k8s-crashloop,svc-selector
+    run_generator_case "mixed Kubernetes PICK reversed" wave6-mixed-reversed 12 \
+        svc-selector,k8s-crashloop,resource-limits
+    if diff -r "$WORK/gen-wave6-pick/fixtures" "$WORK/gen-wave6-reversed/fixtures" \
+            >"$WORK/wave6-fixture-diff.log" 2>&1; then
+        ok "wave-six fixture bytes are independent of PICK order"
+    else
+        bad "wave-six fixture bytes differ between forward and reversed PICK"
+        sed 's/^/        | /' "$WORK/wave6-fixture-diff.log"
+    fi
+    if diff -r "$WORK/gen-wave6-mixed/fixtures" "$WORK/gen-wave6-mixed-reversed/fixtures" \
+            >"$WORK/mixed-fixture-diff.log" 2>&1; then
+        ok "mixed Kubernetes fixture bytes are independent of PICK order"
+    else
+        bad "mixed Kubernetes fixture bytes differ between forward and reversed PICK"
+        sed 's/^/        | /' "$WORK/mixed-fixture-diff.log"
+    fi
 fi
 
 # ---------------------------------------------------------------- summary

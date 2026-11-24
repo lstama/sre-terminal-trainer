@@ -841,17 +841,18 @@ FIXTURE_NAMES = [
     "ausearch_avc.txt", "dig.txt", "nslookup.txt", "ping.txt", "nc_zv.txt",
     "docker_ps_a.txt", "docker_logs.txt", "docker_inspect.txt",
     "podman_ps_a.txt", "podman_logs.txt", "podman_inspect.txt",
-    "kubectl_get_pods.txt", "kubectl_describe_pod.txt", "kubectl_logs.txt",
-    "kubectl_get_events.txt", "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
+    "kubectl_get_pods.txt", "kubectl_get_svc.txt", "kubectl_get_endpoints.txt",
+    "kubectl_describe_pod.txt", "kubectl_logs.txt", "kubectl_get_events.txt",
+    "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
 ]
 NEUTRAL_FIXTURE = "no data for this scenario\n"
 # The Day 2 troubleshoot pool.  Order matters only for the seeded (no --pick)
 # selection; --pick uses the caller's order verbatim.  Each id is one stage
-# template; every run still emits all 30 fixtures above (unused = NEUTRAL).
+# template; every run still emits all 32 fixtures above (unused = NEUTRAL).
 TROUBLESHOOT_IDS = [
     "svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
     "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict",
-    "oom-kill", "image-pull",
+    "oom-kill", "image-pull", "svc-selector", "resource-limits",
 ]
 TROUBLESHOOT_TEMPLATES = {}
 
@@ -907,15 +908,45 @@ def merge_curl_fixtures(left, right):
 
 
 def merge_reports(left, right):
-    """Compose two whole, labelled command reports in canonical order.
+    """Compose whole labelled command reports in canonical order.
 
-    Journal, memory and container-log fixtures are shared by at most two current
-    templates.  Keeping each report intact avoids inventing a combined process
-    table or interleaving unrelated timestamps, while sorting the two reports
-    makes the bytes independent of PICK order.
+    Keeping each report intact avoids inventing a combined process table or
+    interleaving unrelated timestamps, while sorting the reports makes the
+    bytes independent of PICK order.
     """
     reports = {left.rstrip("\n"), right.rstrip("\n")}
     return "\n\n".join(sorted(reports)) + "\n"
+
+
+def merge_k8s_reports(left, right):
+    """Merge any number of labelled kubectl describe/log reports associatively."""
+    reports = set()
+    for text in (left, right):
+        current = []
+        for line in text.rstrip("\n").splitlines():
+            if line.startswith("# kubectl ") and current:
+                reports.add("\n".join(current).strip("\n"))
+                current = [line]
+            else:
+                current.append(line)
+        if current:
+            reports.add("\n".join(current).strip("\n"))
+    return "\n\n".join(sorted(reports)) + "\n"
+
+
+def merge_table_rows(left, right):
+    """Keep one canonical table header and every Kubernetes evidence row."""
+    headers = set()
+    rows = set()
+    for text in (left, right):
+        for line in text.splitlines():
+            if line.startswith("NAME ") or line.startswith("LAST SEEN "):
+                headers.add(line)
+            elif line.strip():
+                rows.add(line)
+    if not headers:
+        raise ValueError("Kubernetes table merge has no header")
+    return "\n".join([sorted(headers)[0]] + sorted(rows)) + "\n"
 
 
 def merge_container_ps_fixtures(left, right):
@@ -1188,11 +1219,12 @@ def t_k8s_crashloop(rng, fs, fixtures, soft):
     fixed = "\n".join(fixed_lines) + "\n"
     wfile(fs, manifest, broken)
 
-    put_fixture(fixtures, "kubectl_get_pods.txt", "\n".join([
+    put_fixture_merged(fixtures, "kubectl_get_pods.txt", "\n".join([
         "NAME                                     READY   STATUS             RESTARTS   AGE",
         "%-40s 0/1     CrashLoopBackOff   %-9d 42m" % (pod, restarts),
-    ]) + "\n", "k8s-crashloop")
-    put_fixture(fixtures, "kubectl_describe_pod.txt", "\n".join([
+    ]) + "\n", "k8s-crashloop", merge_table_rows)
+    put_fixture_merged(fixtures, "kubectl_describe_pod.txt",
+                       "# kubectl describe pod %s\n%s" % (pod, "\n".join([
         "Name:             %s" % pod,
         "Namespace:        %s" % ns,
         "Labels:           app=%s" % dep,
@@ -1206,15 +1238,17 @@ def t_k8s_crashloop(rng, fs, fixtures, soft):
         "      DB_HOST:  <set from configmap %s, key %s>" % (cm, missing_key),
         "      (configMapKeyRef name=%s key=%s)" % (cm, missing_key),
         "Events:  <use `kubectl get events` for details>",
-    ]) + "\n", "k8s-crashloop")
+    ]) + "\n"), "k8s-crashloop", merge_k8s_reports)
     log_lines = []
     for attempt in range(1, 7):
         log_lines.append("%s api: starting svc-api 1.4.2 (attempt %d)" % (ts(rng), attempt))
         log_lines.append("%s api: FATAL config lookup failed: key '%s' is missing in configmap '%s'; reason %s"
                          % (ts(rng), missing_key, cm, reason))
         log_lines.append("%s api: exiting with status 1" % ts(rng))
-    put_fixture(fixtures, "kubectl_logs.txt", "\n".join(log_lines) + "\n", "k8s-crashloop")
-    put_fixture(fixtures, "kubectl_get_events.txt", "\n".join([
+    put_fixture_merged(fixtures, "kubectl_logs.txt",
+                       "# kubectl logs %s\n%s" % (pod, "\n".join(log_lines) + "\n"),
+                       "k8s-crashloop", merge_k8s_reports)
+    put_fixture_merged(fixtures, "kubectl_get_events.txt", "\n".join([
         "LAST SEEN   TYPE      REASON    OBJECT          MESSAGE",
         "2m          Warning   BackOff   pod/%s  Back-off restarting failed container (code %s)"
         % (pod, reason),
@@ -1222,7 +1256,7 @@ def t_k8s_crashloop(rng, fs, fixtures, soft):
         % (pod, cm, actual_key),
         "5m          Normal    Pulled    pod/%s  Container image already present" % pod,
         "6m          Warning   Unhealthy pod/%s  Readiness probe failed" % pod,
-    ]) + "\n", "k8s-crashloop")
+    ]) + "\n", "k8s-crashloop", merge_table_rows)
     put_fixture(fixtures, "kubectl_get_configmap.txt", "\n".join([
         "Name:         %s" % cm,
         "Namespace:    %s" % ns,
@@ -1230,10 +1264,10 @@ def t_k8s_crashloop(rng, fs, fixtures, soft):
         "====",
         "%s: %s" % (actual_key, db_value),
     ]) + "\n", "k8s-crashloop")
-    put_fixture(fixtures, "kubectl_get_deploy.txt", "\n".join([
+    put_fixture_merged(fixtures, "kubectl_get_deploy.txt", "\n".join([
         "NAME                 READY   UP-TO-DATE   AVAILABLE   AGE",
         "%-20s 0/1     1            0           42m" % dep,
-    ]) + "\n", "k8s-crashloop")
+    ]) + "\n", "k8s-crashloop", merge_table_rows)
 
     if missing_key == actual_key or missing_key not in fixtures["kubectl_logs.txt"]:
         raise AssertionError("k8s-crashloop: missing key clue inconsistent")
@@ -1277,6 +1311,316 @@ def t_k8s_crashloop(rng, fs, fixtures, soft):
         "kubectl get configmap <name> lists the real keys.",
         "Checklist: edit the configMapKeyRef key line in the manifest in place with nano; "
         "the env var name and configmap name are not the problem.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("svc-selector")
+def t_svc_selector(rng, fs, fixtures, soft):
+    """Kubernetes Service triage: pod labels do not match the Service selector."""
+    ns = tok(rng, "ns", 6)
+    svc = tok(rng, "frontend", 6)
+    dep = tok(rng, "webdeploy", 6)
+    pod = "%s-%s-%s" % (dep, hexs(rng, 6), hexs(rng, 5))
+    release = tok(rng, "release", 6)
+    mismatch = tok(rng, "selector-mismatch", 8)
+    service_port = rng.choice([80, 8080, 8443])
+    cluster_ip = ip(rng)
+    connection_fragment = "conn-%s" % hexs(rng, 8)
+    manifest = "/home/trainee/k8s/%s.yaml" % dep
+    target_labels = "tier=web,release=%s" % release
+
+    yaml_lines = [
+        "apiVersion: apps/v1",
+        "kind: Deployment",
+        "metadata:",
+        "  name: %s" % dep,
+        "  namespace: %s" % ns,
+        "spec:",
+        "  replicas: 2",
+        "  selector:",
+        "    matchLabels:",
+        "      tier: web",
+        "  template:",
+        "    metadata:",
+        "      labels:",
+        "        tier: web",
+        "        release: %s" % release,
+        "    spec:",
+        "      containers:",
+        "        - name: web",
+        "          image: registry.example/frontend:2.1.0",
+        "          ports:",
+        "            - containerPort: %d" % service_port,
+    ]
+    broken = "\n".join(yaml_lines) + "\n"
+    fixed_lines = list(yaml_lines)
+    labels_index = fixed_lines.index("      labels:")
+    fixed_lines.insert(labels_index + 1, "        app: %s" % svc)
+    fixed = "\n".join(fixed_lines) + "\n"
+    wfile(fs, manifest, broken, mode=0o644)
+
+    pod_rows = [
+        "NAME                          READY   STATUS             RESTARTS   AGE   LABELS",
+        "%-30s 0/1     Pending           %-9d 7m     %s"
+        % (pod, 0, target_labels),
+    ]
+    for _ in range(4):
+        decoy = "%s-%s-%s" % (tok(rng, "pod", 4), hexs(rng, 4), hexs(rng, 3))
+        decoy_labels = "app=%s,tier=web" % hexs(rng, 6)
+        pod_rows.append("%-30s 1/1     Running            %-9d 12m    %s"
+                        % (decoy, 0, decoy_labels))
+    put_fixture_merged(fixtures, "kubectl_get_pods.txt", "\n".join(pod_rows) + "\n",
+                       "svc-selector", merge_table_rows)
+
+    put_fixture(fixtures, "kubectl_get_svc.txt", "\n".join([
+        "NAME                         TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE   SELECTOR",
+        "%-28s ClusterIP   %-13s <none>         %d/TCP    7m    app=%s"
+        % (svc, cluster_ip, service_port, svc),
+        "endpoint-controller: <none> (%s)" % mismatch,
+    ]) + "\n", "svc-selector")
+    put_fixture(fixtures, "kubectl_get_endpoints.txt", "\n".join([
+        "NAME                         ENDPOINTS   AGE",
+        "%-28s <none>      7m" % svc,
+        "controller: %s matched=0 selector=app=%s" % (mismatch, svc),
+    ]) + "\n", "svc-selector")
+    put_fixture_merged(fixtures, "kubectl_describe_pod.txt",
+                       "# kubectl describe pod %s\n%s" % (pod, "\n".join([
+        "Name:             %s" % pod,
+        "Namespace:        %s" % ns,
+        "Labels:           %s" % target_labels,
+        "Status:           Pending",
+        "Containers:",
+        "  web:",
+        "    Image:        registry.example/frontend:2.1.0",
+        "    State:        Waiting (PodInitializing)",
+        "Service:         <none> (selector app=%s does not match pod labels)" % svc,
+        "Endpoint controller: %s" % mismatch,
+        "Events:          <use `kubectl get events` for details>",
+    ]) + "\n"), "svc-selector", merge_k8s_reports)
+    put_fixture_merged(fixtures, "kubectl_get_events.txt", "\n".join([
+        "LAST SEEN   TYPE      REASON    OBJECT          MESSAGE",
+        "4m          Warning   EndpointsNotFound service/%s  no endpoints: %s; selector app=%s matched 0 pods"
+        % (svc, mismatch, svc),
+    ]) + "\n", "svc-selector", merge_table_rows)
+    put_fixture_merged(fixtures, "kubectl_get_deploy.txt", "\n".join([
+        "NAME                 READY   UP-TO-DATE   AVAILABLE   AGE",
+        "%-20s 0/2     2            0           7m" % dep,
+    ]) + "\n", "svc-selector", merge_table_rows)
+    put_fixture_merged(fixtures, "curl_v.txt", "\n".join([
+        "# curl -v http://%s:%d/" % (cluster_ip, service_port),
+        "*   Trying %s:%d..." % (cluster_ip, service_port),
+        "* connect to %s port %d failed: Connection refused"
+        % (cluster_ip, service_port),
+        "* connection %s: refused" % connection_fragment,
+        "* Closing connection 0",
+    ]) + "\n\n", "svc-selector", merge_curl_fixtures)
+
+    if "app=%s" % svc in target_labels or "        app: %s" % svc in broken:
+        raise AssertionError("svc-selector: broken pod labels already match the Service")
+    if fixed != broken.replace("      labels:\n",
+                               "      labels:\n        app: %s\n" % svc):
+        raise AssertionError("svc-selector: repair is not exactly the missing pod label")
+    if fixed == broken or len(fixed_lines) != len(yaml_lines) + 1:
+        raise AssertionError("svc-selector: repaired deployment does not add one line")
+    if svc not in fixtures["kubectl_get_svc.txt"] or "app=%s" % svc not in fixtures["kubectl_get_svc.txt"]:
+        raise AssertionError("svc-selector: Service name/selector missing from get svc")
+    if mismatch not in fixtures["kubectl_get_endpoints.txt"] \
+            or mismatch not in fixtures["kubectl_get_events.txt"]:
+        raise AssertionError("svc-selector: mismatch fragment missing from endpoint evidence")
+    if "<none>" not in fixtures["kubectl_get_endpoints.txt"] \
+            or "EndpointsNotFound" not in fixtures["kubectl_get_events.txt"]:
+        raise AssertionError("svc-selector: missing-endpoint state not shown")
+    if pod not in fixtures["kubectl_get_pods.txt"] or pod not in fixtures["kubectl_describe_pod.txt"]:
+        raise AssertionError("svc-selector: affected pod missing from shared fixtures")
+    if cluster_ip not in fixtures["curl_v.txt"] or "Connection refused" not in fixtures["curl_v.txt"]:
+        raise AssertionError("svc-selector: curl evidence missing for the Service address")
+
+    checks = [
+        hash_check("svc-selector-1", svc,
+                   "Submit the Service name from `kubectl get svc` whose selector is "
+                   "not selecting any pods."),
+        hash_check("svc-selector-2", mismatch,
+                   "Submit the selector-mismatch fragment printed by `kubectl get endpoints` "
+                   "or the EndpointsNotFound event."),
+        file_check("svc-selector-3", manifest, fixed, "selector-" + dep,
+                   "Repair %s in place: add only the `app` pod-template label named by "
+                   "the Service selector, leaving the existing labels and Deployment "
+                   "selector unchanged." % manifest,
+                   initial=broken),
+    ]
+    instr = (
+        "A Kubernetes Service has no ready endpoints and connections to its cluster address "
+        "are refused. Use `kubectl get svc` to identify the Service and its selector, then "
+        "correlate `kubectl get endpoints`, `kubectl get events`, `kubectl get pods`, "
+        "`kubectl describe pod <pod>`, `kubectl get deploy <name>` and "
+        "`curl -v http://<cluster-ip>:<port>/`.\n\n"
+        "The deployment manifest to repair is %s. Its corrected end state is byte-for-byte "
+        "the shipped file with exactly one new line under `spec.template.metadata.labels`: "
+        "add the label key and value named by the Service selector. Keep both existing pod "
+        "labels, the Deployment selector, image, port and every other byte unchanged, and "
+        "edit the file in place." % manifest
+    )
+    hints = [
+        "Checklist: kubectl get svc shows NAME and SELECTOR; use that selector, not the "
+        "Deployment's tier selector, when comparing pod labels.",
+        "Checklist: kubectl get endpoints and kubectl get events expose the no-endpoint "
+        "state and a unique selector-mismatch token; describe pod corroborates the labels.",
+        "Checklist: add only the missing Service-selector label beneath the pod template's "
+        "labels in nano; Ctrl+O writes in place and Ctrl+X exits.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("resource-limits")
+def t_resource_limits(rng, fs, fixtures, soft):
+    """Kubernetes resource triage: BestEffort pod was OOMKilled without a limit."""
+    ns = tok(rng, "ns", 6)
+    dep = tok(rng, "limits", 6)
+    pod = "%s-%s-%s" % (dep, hexs(rng, 6), hexs(rng, 5))
+    labels = "app=%s,tier=batch,build=%s" % (dep, hexs(rng, 6))
+    oom_fragment = tok(rng, "oom", 8)
+    memory_limit = rng.choice(["128Mi", "256Mi", "384Mi", "512Mi", "768Mi"])
+    restarts = rng.randint(8, 24)
+    manifest = "/home/trainee/k8s/%s.yaml" % dep
+
+    yaml_lines = [
+        "apiVersion: apps/v1",
+        "kind: Deployment",
+        "metadata:",
+        "  name: %s" % dep,
+        "  namespace: %s" % ns,
+        "spec:",
+        "  replicas: 1",
+        "  selector:",
+        "    matchLabels:",
+        "      app: %s" % dep,
+        "  template:",
+        "    metadata:",
+        "      labels:",
+        "        app: %s" % dep,
+        "        tier: batch",
+        "    spec:",
+        "      containers:",
+        "        - name: worker",
+        "          image: registry.example/batch-worker:3.4.1",
+        "          ports:",
+        "            - containerPort: 9090",
+    ]
+    broken = "\n".join(yaml_lines) + "\n"
+    fixed_lines = list(yaml_lines)
+    image_index = fixed_lines.index("          image: registry.example/batch-worker:3.4.1")
+    fixed_lines[image_index + 1:image_index + 1] = [
+        "          resources:",
+        "            limits:",
+        "              memory: %s" % memory_limit,
+    ]
+    fixed = "\n".join(fixed_lines) + "\n"
+    wfile(fs, manifest, broken, mode=0o644)
+
+    pod_rows = [
+        "NAME                          READY   STATUS             RESTARTS   AGE   LABELS",
+        "%-30s 0/1     CrashLoopBackOff   %-9d 18m    %s"
+        % (pod, restarts, labels),
+    ]
+    for _ in range(3):
+        decoy = "%s-%s-%s" % (tok(rng, "batch", 4), hexs(rng, 4), hexs(rng, 3))
+        decoy_labels = "app=%s,tier=batch" % hexs(rng, 6)
+        pod_rows.append("%-30s 1/1     Running            %-9d 2h     %s"
+                        % (decoy, 0, decoy_labels))
+    put_fixture_merged(fixtures, "kubectl_get_pods.txt", "\n".join(pod_rows) + "\n",
+                       "resource-limits", merge_table_rows)
+    put_fixture_merged(fixtures, "kubectl_describe_pod.txt",
+                       "# kubectl describe pod %s\n%s" % (pod, "\n".join([
+        "Name:             %s" % pod,
+        "Namespace:        %s" % ns,
+        "Labels:           %s" % labels,
+        "QoS Class:        BestEffort",
+        "Containers:",
+        "  worker:",
+        "    Image:        registry.example/batch-worker:3.4.1",
+        "    State:        Waiting (CrashLoopBackOff)",
+        "    Last State:   Terminated (OOMKilled, exit code 137)",
+        "    Limits:        <none>",
+        "Incident token:  %s" % oom_fragment,
+        "Memory policy:   set resources.limits.memory to %s" % memory_limit,
+        "Events:          <use `kubectl get events` for details>",
+    ]) + "\n"), "resource-limits", merge_k8s_reports)
+    put_fixture_merged(fixtures, "kubectl_get_events.txt", "\n".join([
+        "LAST SEEN   TYPE      REASON    OBJECT          MESSAGE",
+        "3m          Warning   OOMKilling pod/%s  container worker was OOMKilled; incident %s"
+        % (pod, oom_fragment),
+        "4m          Warning   BackOff   pod/%s  Back-off restarting failed container" % pod,
+        "6m          Normal    MemoryPolicy pod/%s  workload review: set resources.limits.memory to %s"
+        % (pod, memory_limit),
+    ]) + "\n", "resource-limits", merge_table_rows)
+    put_fixture_merged(fixtures, "kubectl_logs.txt",
+                       "# kubectl logs %s\n%s" % (pod, "\n".join([
+        "%s worker: processing batch with growing working set" % ts(rng),
+        "%s worker: terminated by OOM killer (incident %s)" % (ts(rng), oom_fragment),
+        "%s supervisor: recommended resources.limits.memory=%s"
+        % (ts(rng), memory_limit),
+    ]) + "\n"), "resource-limits", merge_k8s_reports)
+    put_fixture_merged(fixtures, "kubectl_get_deploy.txt", "\n".join([
+        "NAME                 READY   UP-TO-DATE   AVAILABLE   AGE",
+        "%-20s 0/1     1            0           18m" % dep,
+    ]) + "\n", "resource-limits", merge_table_rows)
+
+    if "resources:" in broken or ("memory: %s" % memory_limit) in broken:
+        raise AssertionError("resource-limits: broken deployment already has the memory limit")
+    resource_lines = [
+        "          resources:",
+        "            limits:",
+        "              memory: %s" % memory_limit,
+    ]
+    if fixed_lines[image_index + 1:image_index + 4] != resource_lines \
+            or len(fixed_lines) != len(yaml_lines) + 3 or fixed == broken:
+        raise AssertionError("resource-limits: repair is not exactly the missing resource block")
+    if pod not in fixtures["kubectl_get_pods.txt"] or "CrashLoopBackOff" not in fixtures["kubectl_get_pods.txt"]:
+        raise AssertionError("resource-limits: crashing pod missing from shared pod table")
+    describe = fixtures["kubectl_describe_pod.txt"]
+    events = fixtures["kubectl_get_events.txt"]
+    logs = fixtures["kubectl_logs.txt"]
+    if "QoS Class:        BestEffort" not in describe or "Limits:        <none>" not in describe:
+        raise AssertionError("resource-limits: BestEffort/no-limits evidence missing")
+    if "OOMKilled" not in describe or oom_fragment not in describe or oom_fragment not in events:
+        raise AssertionError("resource-limits: OOM state/fragment missing from describe/events")
+    if "OOMKilling" not in events or memory_limit not in events or memory_limit not in describe:
+        raise AssertionError("resource-limits: recommended memory limit is not revealed")
+    if oom_fragment not in logs or memory_limit not in logs:
+        raise AssertionError("resource-limits: logs do not corroborate OOM and memory limit")
+
+    checks = [
+        hash_check("resource-limits-1", pod,
+                   "Submit the name of the CrashLoopBackOff pod whose last termination was "
+                   "OOMKilled, as shown by `kubectl get pods` and `kubectl describe pod`."),
+        hash_check("resource-limits-2", oom_fragment,
+                   "Submit the OOM incident fragment printed by `kubectl get events` or "
+                   "`kubectl describe pod`."),
+        file_check("resource-limits-3", manifest, fixed, "limits-" + dep,
+                   "Repair %s in place: insert only `resources.limits.memory` under the "
+                   "worker container using the memory limit revealed by the event and "
+                   "description evidence; leave every existing line unchanged." % manifest,
+                   initial=broken),
+    ]
+    instr = (
+        "A Kubernetes worker pod is crash-looping after an OOM kill. Use `kubectl get pods`, "
+        "`kubectl describe pod <pod>`, `kubectl get events`, `kubectl logs <pod>` and "
+        "`kubectl get deploy <name>` to identify the pod, confirm its QoS and missing limits, "
+        "and recover the OOM incident token and reviewed memory-limit value.\n\n"
+        "The deployment manifest to repair is %s. Its corrected end state is byte-for-byte "
+        "the shipped file with exactly one new `resources` block inserted immediately after "
+        "the worker image: `resources`, then `limits`, then `memory` set to the value revealed "
+        "by the evidence. Keep all existing labels, image, port and every other line unchanged, "
+        "and edit the file in place." % manifest
+    )
+    hints = [
+        "Checklist: kubectl get pods identifies CrashLoopBackOff; describe pod shows Last "
+        "State OOMKilled, QoS BestEffort and no container limits.",
+        "Checklist: kubectl get events and kubectl describe pod share an OOM incident token "
+        "and name the reviewed memory limit; kubectl logs corroborates both.",
+        "Checklist: insert only the three-line resources/limits/memory block after the image "
+        "line in nano; Ctrl+O writes in place and Ctrl+X exits.",
     ]
     return instr, hints, checks
 
@@ -2461,7 +2805,7 @@ def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
 # ---------------------------------------------------------------------------
 
 def self_test(seeds, verbose=True):
-    """Generate a full 16-stage terminal set *and* the 10-stage troubleshoot set
+    """Generate a full 16-stage terminal set *and* the 12-stage troubleshoot set
     per seed, then cross-foot every answer against the artefacts on disk.
 
     The templates assert their own load-bearing invariants while generating (e.g.
@@ -2469,8 +2813,8 @@ def self_test(seeds, verbose=True):
     adds the independent, generator-wide checks: flag formula vs ``checks.tsv``
     order, file checks not shipped pre-solved, no answer dump under ``fs/``, the
     two drill-specific claims (top talker, config-drift baseline token), and for
-    troubleshoot: the full 30-fixture contract, broken initial files, and
-    scenario-specific clue placement, including both wave-five drills.
+    troubleshoot: the full 32-fixture contract, broken initial files, and
+    scenario-specific clue placement, including both wave-six drills.
     """
     import re
     import tempfile
@@ -2524,6 +2868,8 @@ def self_test(seeds, verbose=True):
                     flag_digest = fh.read().strip()
 
                 check(hint.strip() != "", "seed %d %s: empty hint file" % (seed, stage["id"]))
+                check("%%" not in instr and "%%" not in hint,
+                      "seed %d %s: literal double percent in stage prose" % (seed, stage["id"]))
                 check(flag_digest == sha_text(stage["flag"]),
                       "seed %d %s: flag.sha256 does not match the stage flag" % (seed, stage["id"]))
                 check(stage["flag"].startswith("FLAG{") and len(stage["flag"]) == 18,
@@ -2599,7 +2945,7 @@ def self_test(seeds, verbose=True):
                 check("answers.json" not in filenames,
                       "seed %d: answers.json leaked into %s" % (seed, dirpath))
 
-            # ---- troubleshoot profile: all ten templates, all 30 fixtures ----
+            # ---- troubleshoot profile: all twelve templates, all 32 fixtures ----
             with tempfile.TemporaryDirectory(prefix="sre-selftest-ts.") as ts_tmp:
                 ts_dump_path = os.path.join(ts_tmp, "answers.json")
                 ts_stages, ts_order, ts_final = write_outputs(
@@ -2616,6 +2962,11 @@ def self_test(seeds, verbose=True):
                 check(present == sorted(FIXTURE_NAMES),
                       "seed %d: troubleshoot fixtures set mismatch (missing=%s extra=%s)"
                       % (seed, missing, extra))
+                for name in FIXTURE_NAMES:
+                    if name in present:
+                        with open(os.path.join(ts_fixtures, name), encoding="utf-8") as fh:
+                            check("%%" not in fh.read(),
+                                  "seed %d: literal double percent in fixture %s" % (seed, name))
                 check(ts_order == list(TROUBLESHOOT_IDS),
                       "seed %d: troubleshoot pick order mismatch" % seed)
                 check(ts_dump["order"] == list(TROUBLESHOOT_IDS),
@@ -2676,9 +3027,157 @@ def self_test(seeds, verbose=True):
                             check(False, "seed %d %s/%s: unknown check type" % (seed, sid, cid))
                     with open(os.path.join(sd, "instruction"), "r", encoding="utf-8") as fh:
                         ts_instr = fh.read()
+                    check("%%" not in ts_instr and all("%%" not in h for h in stage["hints"]),
+                          "seed %d %s: literal double percent in troubleshoot prose"
+                          % (seed, sid))
                     for c in stage["checks"]:
                         check(c["id"] in ts_instr,
                               "seed %d %s: instruction omits %s" % (seed, sid, c["id"]))
+
+                # The Kubernetes drills must retain their own clues after composition.
+                if "k8s-crashloop" in ts_order:
+                    with open(os.path.join(ts_fixtures, "kubectl_get_pods.txt"),
+                              encoding="utf-8") as fh:
+                        k8s_pods = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_describe_pod.txt"),
+                              encoding="utf-8") as fh:
+                        k8s_describe = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_logs.txt"),
+                              encoding="utf-8") as fh:
+                        k8s_logs = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_get_events.txt"),
+                              encoding="utf-8") as fh:
+                        k8s_events = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_get_deploy.txt"),
+                              encoding="utf-8") as fh:
+                        k8s_deploy = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_get_configmap.txt"),
+                              encoding="utf-8") as fh:
+                        k8s_configmap = fh.read()
+                    k8s_checks = ts_dump["stages"]["k8s-crashloop"]["checks"]
+                    k8s_answers = [c["answer"] for c in k8s_checks]
+                    k8s_pod, k8s_reason = k8s_answers[0].split(":", 1)
+                    k8s_actual_match = re.search(r"^\s+key: (\S+)$", k8s_answers[2],
+                                                 re.MULTILINE)
+                    k8s_actual_key = k8s_actual_match.group(1) if k8s_actual_match else ""
+                    check(k8s_pod in k8s_pods and k8s_pod in k8s_describe
+                          and k8s_pod in k8s_events
+                          and os.path.basename(k8s_checks[2]["path"])[:-5] in k8s_deploy,
+                          "seed %d: shared Kubernetes tables lost k8s-crashloop evidence" % seed)
+                    check(k8s_reason in k8s_logs and k8s_answers[1] in k8s_logs
+                          and k8s_actual_key in k8s_configmap,
+                          "seed %d: shared Kubernetes logs/configmap lost k8s-crashloop clues"
+                          % seed)
+                if "svc-selector" in ts_order:
+                    with open(os.path.join(ts_fixtures, "kubectl_get_svc.txt"),
+                              encoding="utf-8") as fh:
+                        selector_svc = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_get_endpoints.txt"),
+                              encoding="utf-8") as fh:
+                        selector_endpoints = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_get_events.txt"),
+                              encoding="utf-8") as fh:
+                        selector_events = fh.read()
+                    with open(os.path.join(ts_fixtures, "curl_v.txt"),
+                              encoding="utf-8") as fh:
+                        selector_curl = fh.read()
+                    selector_checks = ts_dump["stages"]["svc-selector"]["checks"]
+                    selector_answers = [c["answer"] for c in selector_checks]
+                    selector_cfg = os.path.join(ts_fs, selector_checks[2]["path"].lstrip("/"))
+                    with open(selector_cfg, encoding="utf-8") as fh:
+                        selector_broken = fh.read()
+                    service_row = next((line for line in selector_svc.splitlines()
+                                        if re.match(r"^" + re.escape(selector_answers[0]) + r"\s",
+                                                    line)), "")
+                    service_fields = service_row.split()
+                    selector_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                               % ts_dump["stages"]["svc-selector"]["index"])
+                    with open(os.path.join(selector_sd, "instruction"), encoding="utf-8") as fh:
+                        selector_instr = fh.read()
+                    check(bool(service_fields) and "ClusterIP" in service_fields
+                          and ("app=" + selector_answers[0]) in service_row,
+                          "seed %d: Service name/selector missing from kubectl get svc" % seed)
+                    check(selector_answers[1] in selector_svc
+                          and selector_answers[1] in selector_endpoints
+                          and selector_answers[1] in selector_events
+                          and "<none>" in selector_endpoints
+                          and "EndpointsNotFound" in selector_events,
+                          "seed %d: selector-mismatch/no-endpoint evidence is incomplete" % seed)
+                    check(len(service_fields) >= 5 and service_fields[2] in selector_curl
+                          and service_fields[4].split("/", 1)[0] in selector_curl
+                          and "Connection refused" in selector_curl,
+                          "seed %d: Service curl refusal lacks cluster address/port" % seed)
+                    check(selector_answers[2] == selector_broken.replace(
+                              "      labels:\n",
+                              "      labels:\n        app: %s\n" % selector_answers[0])
+                          and selector_answers[2] != selector_broken,
+                          "seed %d: Service selector repair is not the exact added pod label" % seed)
+                    check(all(command in selector_instr for command in
+                              ("kubectl get svc", "kubectl get endpoints", "kubectl get events",
+                               "kubectl describe pod", "kubectl get deploy", "curl -v")),
+                          "seed %d: Service selector instruction omits its checklist" % seed)
+                    check(selector_answers[0] not in selector_instr
+                          and selector_answers[1] not in selector_instr,
+                          "seed %d: Service selector instruction reveals an answer" % seed)
+                if "resource-limits" in ts_order:
+                    with open(os.path.join(ts_fixtures, "kubectl_get_pods.txt"),
+                              encoding="utf-8") as fh:
+                        limits_pods = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_describe_pod.txt"),
+                              encoding="utf-8") as fh:
+                        limits_describe = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_get_events.txt"),
+                              encoding="utf-8") as fh:
+                        limits_events = fh.read()
+                    with open(os.path.join(ts_fixtures, "kubectl_logs.txt"),
+                              encoding="utf-8") as fh:
+                        limits_logs = fh.read()
+                    limits_checks = ts_dump["stages"]["resource-limits"]["checks"]
+                    limits_answers = [c["answer"] for c in limits_checks]
+                    limits_cfg = os.path.join(ts_fs, limits_checks[2]["path"].lstrip("/"))
+                    with open(limits_cfg, encoding="utf-8") as fh:
+                        limits_broken = fh.read()
+                    limit_match = re.search(r"^              memory: (\S+)$",
+                                            limits_answers[2], re.MULTILINE)
+                    limit_value = limit_match.group(1) if limit_match else ""
+                    limits_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                             % ts_dump["stages"]["resource-limits"]["index"])
+                    with open(os.path.join(limits_sd, "instruction"), encoding="utf-8") as fh:
+                        limits_instr = fh.read()
+                    pod_row = next((line for line in limits_pods.splitlines()
+                                    if re.match(r"^" + re.escape(limits_answers[0]) + r"\s",
+                                                line)), "")
+                    check(bool(pod_row) and "CrashLoopBackOff" in pod_row
+                          and limits_answers[0] in limits_describe
+                          and "QoS Class:        BestEffort" in limits_describe
+                          and "Limits:        <none>" in limits_describe
+                          and "OOMKilled" in limits_describe,
+                          "seed %d: resource-limit pod/QoS/OOM evidence is incomplete" % seed)
+                    check(limits_answers[1] in limits_events
+                          and limits_answers[1] in limits_describe
+                          and limits_answers[1] in limits_logs and "OOMKilling" in limits_events,
+                          "seed %d: resource-limit OOM fragment is missing or inconsistent" % seed)
+                    check(bool(limit_value) and limit_value in limits_events
+                          and limit_value in limits_describe and limit_value in limits_logs,
+                          "seed %d: reviewed memory limit is not revealed by fixtures" % seed)
+                    expected_limit_lines = limits_broken.splitlines()
+                    image_index = expected_limit_lines.index(
+                        "          image: registry.example/batch-worker:3.4.1")
+                    expected_limit_lines[image_index + 1:image_index + 1] = [
+                        "          resources:", "            limits:",
+                        "              memory: %s" % limit_value,
+                    ]
+                    check("resources:" not in limits_broken
+                          and limits_answers[2] == "\n".join(expected_limit_lines) + "\n",
+                          "seed %d: resource-limit repair is not the exact inserted block" % seed)
+                    check(all(command in limits_instr for command in
+                              ("kubectl get pods", "kubectl describe pod", "kubectl get events",
+                               "kubectl logs", "kubectl get deploy")),
+                          "seed %d: resource-limit instruction omits its checklist" % seed)
+                    check(limits_answers[0] not in limits_instr
+                          and limits_answers[1] not in limits_instr
+                          and (not limit_value or limit_value not in limits_instr),
+                          "seed %d: resource-limit instruction reveals an answer" % seed)
 
                 # The new drills must surface their clues in the real fixtures.
                 if "disk-full" in ts_order:

@@ -1,6 +1,6 @@
 # Day 2: the troubleshoot profile
 
-The trainer's second profile is a pool of ten diagnostic drills whose terminal
+The trainer's second profile is a pool of twelve diagnostic drills whose terminal
 commands are answered from fixtures instead of a live machine. It exists to
 practise the read-then-repair loop — inspect the evidence, decide on one change,
 make it, prove it — without shipping a privileged container, a systemd host or a
@@ -14,11 +14,11 @@ profile, the interaction is identical; only the stages differ.
 - Profile flag: `PROFILE=troubleshoot`
 - Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`,
   `nginx-config`, `dns-mismatch`, `selinux-avc`, `port-conflict`, `oom-kill`,
-  `image-pull`
+  `image-pull`, `svc-selector`, `resource-limits`
 - Image / container: `sre-terminal-trainer-troubleshoot:local` / `sre-trainer-troubleshoot`
   (separate from the default names, so both profiles can run side by side)
 
-## The ten templates
+## The twelve templates
 
 Each stage's brief names the exact files and check ids. The checklists below are
 the commands the stage is built around; the facts they expose are randomized per
@@ -199,6 +199,47 @@ Two hash checks use the available image reference and failure request-id. The
 file check replaces only `IMAGE` in `/home/trainee/containers/<name>.env`,
 preserving the rest of the deploy environment byte for byte.
 
+### `svc-selector`
+
+A Kubernetes Service has no ready endpoints and its cluster address refuses
+connections. Compare the Service selector with the actual pod-template labels,
+then correlate the endpoint controller, events, pod description and deployment:
+
+| Command | What it is for |
+|---|---|
+| `kubectl get svc [name]` | Service name, cluster address, port and selector |
+| `kubectl get endpoints [name]` | The missing endpoint set and controller mismatch fragment |
+| `kubectl get events` | `EndpointsNotFound` and the matching mismatch fragment |
+| `kubectl get pods` | Randomized pod names and labels, including non-matching candidates |
+| `kubectl describe pod <pod>` | The affected pod's labels and Service-match context |
+| `kubectl get deploy <name>` | Deployment readiness and workload identity |
+| `curl -v http://<cluster-ip>:<port>/` | Refused connection to the Service address |
+
+Two hash checks use the Service name and selector-mismatch fragment. The file
+check repairs a deployment under `/home/trainee/k8s/` by adding only the
+pod-template label named by the Service selector. Existing pod labels, the
+Deployment selector, image, port and all other bytes must remain unchanged.
+
+### `resource-limits`
+
+A Kubernetes worker is crash-looping after an OOM kill. Establish the pod
+identity, its `BestEffort` QoS, the absent limits and the reviewed memory value
+before editing the workload:
+
+| Command | What it is for |
+|---|---|
+| `kubectl get pods` | CrashLoopBackOff pod name, restart count and labels |
+| `kubectl describe pod <pod>` | Last termination `OOMKilled`, `BestEffort` QoS, no limits, OOM fragment and memory-policy clue |
+| `kubectl get events` | OOM event, incident fragment and reviewed memory limit |
+| `kubectl logs <pod>` | Container-side corroboration of the OOM and recommended limit |
+| `kubectl get deploy <name>` | Deployment readiness and workload identity |
+
+Two hash checks use the pod name and OOM incident fragment. The file check
+repairs a deployment under `/home/trainee/k8s/` by inserting only the missing
+`resources.limits.memory` block after the container image, using the value
+revealed by the fixtures. Every existing line must remain byte-for-byte
+unchanged.
+
 ## How the mocks work
 
 Orchestration detail, not something a trainee needs to act on.
@@ -212,19 +253,21 @@ Orchestration detail, not something a trainee needs to act on.
 - **PATH ordering is part of the contract.** The troubleshoot image sets
   `PATH="/usr/local/bin:…"` so the mocks shadow both BusyBox applets in `/bin`
   and any package tool in `/usr/bin`.
-- **Fixtures are flat files.** The generator writes 30 named text files; the
+- **Fixtures are flat files.** The generator writes 32 named text files; the
   builder copies them to `/var/lib/sremock/current/` (root-owned, directories
   0755, files 0644 so the trainee can read them). `sremock` copies the selected
   file's bytes to stdout unchanged — no prefix, no added newline, CRLF and a
   missing final newline are preserved. When selected stages share evidence,
-  the generator composes it in a canonical order: socket rows and container
-  tables are combined, inspection arrays retain every object, and labelled
-   journal, memory or log reports stay intact. Every selected stage therefore
-   keeps its own clues regardless of `PICK` order.
+  the generator composes it in a canonical order: socket, Kubernetes and
+  container table rows are combined, inspection arrays retain every object,
+  and labelled journal, memory, container-log and Kubernetes describe/log
+  reports stay intact. Every selected stage therefore keeps its own clues
+  regardless of `PICK` order.
 - **Selection is a small explicit parser, not a shell.** `journalctl -u UNIT -n
   100 --no-pager` accepts those three flags in any order; `journalctl -xe` is
-  its own form. `kubectl` distinguishes `get pods`, `get events`, `get
-  configmap NAME`, `get deploy NAME`, `describe pod NAME` and `logs POD`.
+  its own form. `kubectl` distinguishes `get pods`, `get svc [NAME]`,
+  `get endpoints [NAME]`, `get events`, `get configmap NAME`, `get deploy NAME`,
+  `describe pod NAME` and `logs POD`.
   `docker`/`podman` distinguish `ps -a`, `logs` and `inspect`. The general
   triage commands have one fixture each, selected by their documented form:
   `ps aux`, `ss -tlnp`, `df -h`, `free -m`, `top`, `du -sh DIR`, `nginx -t`,
@@ -245,7 +288,7 @@ Orchestration detail, not something a trainee needs to act on.
 ## Running it
 
 ```sh
-make up PROFILE=troubleshoot                         # seeded selection of all ten
+make up PROFILE=troubleshoot                         # seeded selection of all twelve
 # Or choose an exact, ordered subset:
 make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
@@ -254,10 +297,10 @@ make ssh
 - `PICK` names any non-empty subset and its exact order for this build
   (`--pick` in the generator). With `PICK` set, `SET` does not decide the count;
   the picked list does.
-- With no `PICK`, this profile defaults to `SET=10`, selecting all ten templates
-  in seeded order. `SET=1` through `9` selects that many from the pool; values
-  outside 1–10 are rejected before the build. The terminal profile keeps its
-  default `SET=8`.
+- With no `PICK`, this profile defaults to `SET=12`, selecting all twelve
+  templates in seeded order. `SET=1` through `11` selects that many from the
+  pool; values outside 1–12 are rejected before the build. The terminal profile
+  keeps its default `SET=8`.
 - `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
   corpus; the generator layer is keyed on the build arguments, so an unchanged
   `SEED` and `PICK` reuse the cached layer.
@@ -338,7 +381,7 @@ A stage is solved when `verify stage` prints its flag — not when the service
 - **Throwaway container.** Your edits live inside the container. `make down`
   removes it, so unrecorded work is gone; the completion record is the only
   thing that persists.
-- **Fixed pool.** There are ten templates. Fixtures for commands the picked
+- **Fixed pool.** There are twelve templates. Fixtures for commands the picked
   stages do not use are still shipped, but they print a neutral placeholder
   instead of scenario data.
 

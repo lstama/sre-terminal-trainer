@@ -85,13 +85,13 @@ egress); the drills are all local files.
   Podman maps container-root into the user namespace, where setuid still works).
 - **Host credentials are generated per instance** by `up` (mode 0600, never committed).
 - **Day 2 is the `troubleshoot` profile.** A second profile (`PROFILE=troubleshoot`)
-  reuses the same harness for ten diagnostic templates (`svc-crashloop`,
+  reuses the same harness for twelve diagnostic templates (`svc-crashloop`,
   `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`,
-  `selinux-avc`, `port-conflict`, `oom-kill`, `image-pull`). Their service commands
-  are mocked; `ls -l` reads real ownership metadata on reference assets. Shared
-  socket, curl, journal, resource and container fixtures compose evidence when
-  multiple selected stages need them. Details:
-  `docs/troubleshooting.md`.
+  `selinux-avc`, `port-conflict`, `oom-kill`, `image-pull`, `svc-selector`,
+  `resource-limits`). Their service commands are mocked; `ls -l` reads real
+  ownership metadata on reference assets. Shared socket, curl, journal, resource,
+  container and Kubernetes fixtures compose evidence when multiple selected
+  stages need them. Details: `docs/troubleshooting.md`.
 
 ## Task split
 
@@ -106,6 +106,7 @@ egress); the drills are all local files.
 | T07 | Docker/Podman engine abstraction, Podman install, both-engine verification | done |
 | T30 | Add `selinux-avc` and `port-conflict`; expand troubleshoot pool to eight | done |
 | T33 | Add `oom-kill` and `image-pull`; expand troubleshoot pool to ten | done |
+| T35 | Add `svc-selector` and `resource-limits`; expand troubleshoot pool to twelve | done |
 
 ## Open questions
 
