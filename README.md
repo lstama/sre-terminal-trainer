@@ -48,6 +48,17 @@ make best        # your local runs, fastest first
 
 `make new` tears down and starts a fresh challenge set. Run `make help` for the full target list.
 
+## Day 2 troubleshoot profile
+
+A second profile (`PROFILE=troubleshoot`) reuses this same harness for two diagnostic stages that exercise the service and Kubernetes troubleshooting commands — `systemctl`, `journalctl`, `ss` and `kubectl`. Those commands are mocked: one small compiled binary is symlinked under each command name and prints a fixture, so there is no systemd, no privileged container and no Kubernetes cluster behind them.
+
+```sh
+make up PROFILE=troubleshoot PICK=svc-crashloop,k8s-crashloop
+make ssh
+```
+
+The briefs, hints, checks, flags, `verify` commands, timing records and `make down` / `make best` work exactly as above — only the drills change. Full pilot notes: [docs/troubleshooting.md](docs/troubleshooting.md).
+
 ## Make targets
 
 | Target | What it does |
