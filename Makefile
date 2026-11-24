@@ -18,10 +18,27 @@ SHELL := /bin/sh
 # podman (build/run/exec/ps/logs/inspect/cp/image/rm/rmi).
 ENGINE    ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 
+# terminal (default) is the original drill set and original image/container
+# names. troubleshoot uses the mock-command image and its own names so it can
+# run alongside a terminal instance.
+PROFILE   ?= terminal
+PICK      ?=
+
+ifeq ($(PROFILE),troubleshoot)
+IMAGE     ?= sre-terminal-trainer-troubleshoot:local
+CONTAINER ?= sre-trainer-troubleshoot
+BUILD_TARGET := troubleshoot
+BUILD_PROFILE_ARGS := --build-arg PROFILE=troubleshoot --build-arg PICK=$(PICK)
+else
 IMAGE     ?= sre-terminal-trainer:local
 CONTAINER ?= sre-trainer
+BUILD_TARGET :=
+BUILD_PROFILE_ARGS :=
+endif
+
 PORT      ?= 2222
-SET       ?= 8
+# The troubleshoot pilot has only two templates; keep the terminal default at 8.
+SET       ?= $(if $(filter troubleshoot,$(PROFILE)),2,8)
 SEED      ?=
 SSH_USER  ?= trainee
 
@@ -42,24 +59,34 @@ help:
 	  '' \
 	  '  make up [SEED=1234] [SET=8] [PORT=2222]' \
 	  '                           build the image and start the container' \
+	  '  make up PROFILE=troubleshoot PICK=svc-crashloop,k8s-crashloop' \
+	  '                           build the mock-command pilot image and start it' \
 	  '  make ssh                log in as the trainee (password prompt)' \
 	  '  make status             container, credentials, seed, stage and record status' \
 	  '  make down               save completion records, then remove the container' \
 	  '  make new                down + up with a fresh random seed' \
 	  '  make best               local completion records, fastest first' \
-	  '  make test               up/down cycle, then assert the tree stays clean' \
+	  '  make test               verifier + troubleshoot smoke, up/down, clean tree' \
 	  '  make demo               re-record docs/demo/sample-run.mp4 and .gif (needs vhs)' \
 	  '  make demo-mp4           re-record only the MP4 deliverable' \
 	  '  make demo-gif           re-record only the GIF deliverable' \
 	  '  make clean              remove container, image, .instance/ and state/' \
 	  '' \
 	  'Variables: ENGINE (podman|docker, auto-detected), IMAGE, CONTAINER,' \
-	  '           PORT, SET, SEED, SSH_USER, INSTANCE (.instance), STATE (state)' \
+	  '           PORT, SET, SEED, SSH_USER, INSTANCE (.instance), STATE (state),' \
+	  '           PROFILE (terminal|troubleshoot, default terminal),' \
+	  '           PICK (comma-separated troubleshoot template ids; empty = seeded selection from the pool)' \
 	  '' \
 	  'State lives in .instance/ (0600 credentials) and state/ (records).' \
 	  'Both are gitignored; only source, config and docs are committed.'
 
 up:
+	@if [ '$(PROFILE)' = troubleshoot ]; then
+	  case '$(SET)' in
+	    1|2) ;;
+	    *) echo "error: PROFILE=troubleshoot supports SET=1 or SET=2 (pilot range 1-2); got $(SET)" >&2; exit 1 ;;
+	  esac
+	fi
 	@mkdir -p $(INSTANCE) $(STATE)
 	chmod 700 $(INSTANCE)
 	if [ ! -s $(CREDS) ]; then
@@ -85,8 +112,17 @@ up:
 	  echo "error: port $(PORT) is already in use; retry with PORT=<free port>" >&2
 	  exit 1
 	fi
+	case '$(PROFILE)' in
+	  terminal|troubleshoot) ;;
+	  *) echo "error: PROFILE must be terminal or troubleshoot" >&2; exit 1 ;;
+	esac
+	if [ '$(PROFILE)' = troubleshoot ]; then
+	  printf '==> profile=troubleshoot pick=%s (image/container names are the troubleshoot ones)\n' '$(PICK)'
+	fi
 	printf '==> building %s (seed=%s set=%s, engine=%s)\n' '$(IMAGE)' "$$seed" '$(SET)' '$(ENGINE)'
-	$(ENGINE) build --build-arg SEED="$$seed" --build-arg SET='$(SET)' -t '$(IMAGE)' .
+	$(ENGINE) build $(BUILD_TARGET:%=--target %) \
+	  --build-arg SEED="$$seed" --build-arg SET='$(SET)' $(BUILD_PROFILE_ARGS) \
+	  -t '$(IMAGE)' .
 	$(ENGINE) rm -f '$(CONTAINER)' >/dev/null 2>&1 || true
 	printf '==> starting %s (port %s)\n' '$(CONTAINER)' '$(PORT)'
 	$(ENGINE) run -d --name '$(CONTAINER)' -p '127.0.0.1:$(PORT)':22 \
@@ -180,6 +216,10 @@ best:
 	python3 tools/best.py $(STATE)/records.jsonl
 
 test:
+	@printf '==> verifier smoke\n'
+	sh tests/smoke.sh
+	@printf '==> troubleshoot smoke\n'
+	sh tests/troubleshoot_smoke.sh
 	@printf '==> up/down cycle\n'
 	$(MAKE) --no-print-directory up
 	$(MAKE) --no-print-directory down
@@ -195,7 +235,7 @@ test:
 	  printf 'FAIL: working tree not clean after up/down:\n%s\n' "$$(git status --porcelain)" >&2
 	  exit 1
 	fi
-	printf '==> OK: image builds, container runs, tree is clean\n'
+	printf '==> OK: smoke tests pass, image builds, container runs, tree is clean\n'
 
 clean:
 	@$(ENGINE) rm -f '$(CONTAINER)' >/dev/null 2>&1 || true

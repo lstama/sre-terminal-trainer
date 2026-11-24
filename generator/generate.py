@@ -5,7 +5,8 @@ Python 3 standard library only.  Everything written by this script lives under
 the directory passed with --out (plus the optional --dump-answers file).
 
 CLI:
-    python3 generate.py --seed SEED --set N --out DIR [--dump-answers FILE]
+    python3 generate.py --seed SEED --set N --out DIR [--dump-answers FILE] \\
+        [--profile terminal|troubleshoot] [--pick id1,id2]
 """
 
 import argparse
@@ -828,15 +829,356 @@ def t_nav_maze(rng, fs):
 
 
 # ---------------------------------------------------------------------------
+# troubleshoot pilot templates (only used by --profile troubleshoot)
+# ---------------------------------------------------------------------------
+
+# Flat fixture directory consumed by the mock command layer in the image.
+# The order here is the T16 contract order; every name is always emitted.
+FIXTURE_NAMES = [
+    "systemctl_status.txt", "journalctl_unit.txt", "journalctl_xe.txt",
+    "ps_aux.txt", "ss_tlnp.txt", "curl_v.txt", "curl_I.txt", "df_h.txt",
+    "free_m.txt", "top.txt", "du_sh.txt", "nginx_t.txt", "getenforce.txt",
+    "ausearch_avc.txt", "dig.txt", "nslookup.txt", "ping.txt", "nc_zv.txt",
+    "docker_ps_a.txt", "docker_logs.txt", "docker_inspect.txt",
+    "podman_ps_a.txt", "podman_logs.txt", "podman_inspect.txt",
+    "kubectl_get_pods.txt", "kubectl_describe_pod.txt", "kubectl_logs.txt",
+    "kubectl_get_events.txt", "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
+]
+NEUTRAL_FIXTURE = "no data for this scenario\n"
+TROUBLESHOOT_IDS = ["svc-crashloop", "k8s-crashloop"]
+TROUBLESHOOT_TEMPLATES = {}
+
+
+def troubleshoot_template(tid):
+    def deco(fn):
+        TROUBLESHOOT_TEMPLATES[tid] = fn
+        return fn
+    return deco
+
+
+def hexs(rng, n=4):
+    """Short deterministic lowercase hex suffix for randomized names."""
+    return "".join(rng.choice(HEX) for _ in range(n))
+
+
+def put_fixture(fixtures, name, content, tid):
+    if name not in FIXTURE_NAMES:
+        raise ValueError("%s: unknown fixture %r" % (tid, name))
+    if name in fixtures and fixtures[name] != content:
+        raise ValueError("%s: conflicting content for fixture %s" % (tid, name))
+    fixtures[name] = content
+
+
+@troubleshoot_template("svc-crashloop")
+def t_svc_crashloop(rng, fs, fixtures):
+    """Broken systemd unit: crash loop, port conflict and a drifted DB host."""
+    svc = tok(rng, "svc", 6)
+    unit = svc + ".service"
+    cfg = "/etc/%s/app.conf" % svc
+    unit_path = "/etc/systemd/system/" + unit
+    agent = svc + "-agent"
+
+    held_port = rng.randint(40000, 49000)
+    free_port = rng.randint(51000, 59999)
+    holder = tok(rng, "holder", 6)
+    holder_pid = rng.randint(1500, 32000)
+    holder_fd = rng.randint(8, 40)
+    err = tok(rng, "E", 8)
+    old_db = "db-old-%s.internal.example" % hexs(rng, 4)
+    new_db = "db-new-%s.internal.example" % hexs(rng, 4)
+
+    base = [
+        "# service configuration managed by the troubleshoot pilot",
+        "service_name = %s" % svc,
+        "bind_port = %d" % held_port,
+        "db_host = %s" % old_db,
+        "log_level = warn",
+    ]
+    fixed_lines = list(base)
+    fixed_lines[2] = "bind_port = %d" % free_port
+    fixed_lines[3] = "db_host = %s" % new_db
+    broken = "\n".join(base) + "\n"
+    fixed = "\n".join(fixed_lines) + "\n"
+    # The checked config is deliberately writable by the unprivileged trainee;
+    # the unit file is only context and is never a checked path.
+    wfile(fs, cfg, broken, mode=0o666)
+    wfile(fs, unit_path, "\n".join([
+        "[Unit]",
+        "Description=%s demo service (troubleshoot pilot)" % svc,
+        "After=network.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        "ExecStart=/usr/local/bin/%s --config %s" % (agent, cfg),
+        "Restart=always",
+        "RestartSec=2",
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+    ]) + "\n")
+
+    # systemctl status carries the same error code as the journal.
+    put_fixture(fixtures, "systemctl_status.txt", "\n".join([
+        "* %s - %s demo service (troubleshoot pilot)" % (unit, svc),
+        "     Loaded: loaded (%s; enabled; vendor preset: enabled)" % unit_path,
+        "     Active: active (auto-restart) for 3min ago",
+        "   Main PID: %d (code=exited, status=1/FAILURE)" % (holder_pid + 1),
+        "        CPU: 42ms",
+        "",
+        "%s systemd[1]: %s: Main process exited, code=exited, status=1/FAILURE" % (ts(rng), unit),
+        "%s %s[%d]: FATAL: startup aborted with error %s" % (ts(rng), agent, holder_pid + 1, err),
+        "%s systemd[1]: %s: Failed with result 'exit-code'." % (ts(rng), unit),
+    ]) + "\n", "svc-crashloop")
+
+    # Several thousand lines of journal, with repeated crash messages and two
+    # clues: the reserved replacement port and the post-failover DB endpoint.
+    n_lines = rng.randint(3600, 4400)
+    crash_every = rng.randint(37, 73)
+    db_clue = rng.randint(n_lines // 3, (2 * n_lines) // 3)
+    port_clue = rng.randint(n_lines // 4, n_lines // 3)
+    while db_clue % crash_every == 0:
+        db_clue += 1
+    while port_clue % crash_every == 0 or port_clue == db_clue:
+        port_clue += 1
+    journal = []
+    for i in range(1, n_lines + 1):
+        if i % crash_every == 0:
+            journal.append(
+                "%s %s[%d]: ERROR startup failed for %s (error %s, exit status 1); restart %d"
+                % (ts(rng), agent, holder_pid + 1, unit, err, i // crash_every)
+            )
+        elif i == db_clue:
+            journal.append(
+                "%s %s[%d]: INFO database failover complete; new primary endpoint is %s"
+                % (ts(rng), agent, holder_pid + 1, new_db)
+            )
+        elif i == port_clue:
+            journal.append(
+                "%s %s[%d]: WARN configured port %d is bound by %s; reserved replacement port is %d"
+                % (ts(rng), agent, holder_pid + 1, held_port, holder, free_port)
+            )
+        else:
+            journal.append(sys_line(rng))
+    put_fixture(fixtures, "journalctl_unit.txt", "\n".join(journal) + "\n", "svc-crashloop")
+    put_fixture(fixtures, "journalctl_xe.txt", "\n".join([
+        "-- Boot 6f2c1d4e9a844b3c8b1e7d0a5f3c9d21 --",
+        "%s systemd[1]: %s: Main process exited, code=exited, status=1/FAILURE" % (ts(rng), unit),
+        "%s %s[%d]: FATAL: error %s while binding port %d (address already in use)"
+        % (ts(rng), agent, holder_pid + 1, err, held_port),
+        "%s systemd[1]: %s: Failed with result 'exit-code'." % (ts(rng), unit),
+        "Hint: journalctl -u %s -n 100 --no-pager shows the full unit history." % unit,
+    ]) + "\n", "svc-crashloop")
+    put_fixture(fixtures, "ss_tlnp.txt", "\n".join([
+        "State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process",
+        'LISTEN  0       128     0.0.0.0:%-11d 0.0.0.0:*          users:(("%s",pid=%d,fd=%d))'
+        % (held_port, holder, holder_pid, holder_fd),
+        'LISTEN  0       128     127.0.0.1:22       0.0.0.0:*          users:(("sshd",pid=411,fd=3))',
+        'LISTEN  0       128     0.0.0.0:5355      0.0.0.0:*          users:(("resolved",pid=208,fd=12))',
+    ]) + "\n", "svc-crashloop")
+
+    # Load-bearing invariants: the clues must be discoverable and must not be
+    # pre-filled in the broken config, and the conflict must be visible in ss.
+    if new_db in broken or old_db not in broken:
+        raise AssertionError("svc-crashloop: DB host clue/broken state inconsistent")
+    if sum("reserved replacement port is" in line for line in journal) != 1:
+        raise AssertionError("svc-crashloop: replacement-port clue is not unique")
+    if ("%d" % held_port) not in fixtures["ss_tlnp.txt"]:
+        raise AssertionError("svc-crashloop: conflicting port missing from ss output")
+    if ("%d" % free_port) in fixtures["ss_tlnp.txt"]:
+        raise AssertionError("svc-crashloop: replacement port is not actually free")
+    if err not in fixtures["systemctl_status.txt"] or err not in "\n".join(journal):
+        raise AssertionError("svc-crashloop: error code missing from status/journal")
+    if holder not in fixtures["ss_tlnp.txt"]:
+        raise AssertionError("svc-crashloop: port holder missing from ss output")
+
+    svc_answer = "%s:%s" % (svc, err)
+    checks = [
+        hash_check("svc-crashloop-1", svc_answer,
+                   "Submit the failing service name and its error code, joined by a colon "
+                   "(service first), as found in systemctl status and journalctl -u."),
+        file_check("svc-crashloop-2", cfg, fixed, "port-%d" % free_port,
+                   "Repair %s in place: change only bind_port to the reserved free port and "
+                   "db_host to the post-failover endpoint named in the journal." % cfg,
+                   initial=broken),
+        hash_check("svc-crashloop-3", holder,
+                   "Submit the process name shown holding the configured port in ss -tlnp."),
+    ]
+    instr = (
+        "The service %s is crash-looping. Its configuration is %s and its unit is %s. "
+        "Use `systemctl status %s`, `journalctl -u %s -n 100 --no-pager` and "
+        "`journalctl -xe` to find the service name, the repeated error code, the reserved "
+        "replacement port and the post-failover endpoint. Use `ss -tlnp` to "
+        "identify the process that already holds the configured port.\n\n"
+        "The checked config is %s. Its corrected end state is byte-for-byte the shipped "
+        "file with exactly two changes: `bind_port` becomes the reserved free port named "
+        "in the journal, and `db_host` becomes the post-failover endpoint named in the journal. "
+        "Leave every other line unchanged and edit the file in place."
+        % (unit, cfg, unit_path, unit, unit, cfg)
+    )
+    hints = [
+        "Checklist: systemctl status <unit> first; then journalctl -u <unit> -n 100 "
+        "--no-pager and journalctl -xe for the repeated crash signature.",
+        "Checklist: ss -tlnp lists listening ports and their owning processes; a port "
+        "that is not in LISTEN is free. The journal records which port was reserved.",
+        "Checklist: read the journal for the post-failover endpoint, then edit "
+        "only the bind_port and db_host lines of the config in place with nano. Report "
+        "the process name exactly as printed by ss -tlnp.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("k8s-crashloop")
+def t_k8s_crashloop(rng, fs, fixtures):
+    """Mocked kubectl: a CrashLoopBackOff caused by the wrong configmap key."""
+    ns = tok(rng, "ns", 6)
+    dep = tok(rng, "dep", 6)
+    pod = "%s-%s-%s" % (dep, hexs(rng, 6), hexs(rng, 5))
+    cm = tok(rng, "cm", 6)
+    reason = tok(rng, "K8S", 6)
+    missing_key = "DB_HOST_" + hexs(rng, 4)
+    actual_key = "DB_HOSTNAME_" + hexs(rng, 4)
+    db_value = "db-%s.internal.example" % hexs(rng, 6)
+    restarts = rng.randint(9, 30)
+    manifest = "/home/trainee/k8s/%s.yaml" % dep
+
+    yaml_lines = [
+        "apiVersion: apps/v1",
+        "kind: Deployment",
+        "metadata:",
+        "  name: %s" % dep,
+        "  namespace: %s" % ns,
+        "spec:",
+        "  replicas: 1",
+        "  selector:",
+        "    matchLabels:",
+        "      app: %s" % dep,
+        "  template:",
+        "    metadata:",
+        "      labels:",
+        "        app: %s" % dep,
+        "    spec:",
+        "      containers:",
+        "        - name: api",
+        "          image: registry.example/svc-api:1.4.2",
+        "          env:",
+        "            - name: DB_HOST",
+        "              valueFrom:",
+        "                configMapKeyRef:",
+        "                  name: %s" % cm,
+        "                  key: %s" % missing_key,
+    ]
+    broken = "\n".join(yaml_lines) + "\n"
+    fixed_lines = list(yaml_lines)
+    fixed_lines[-1] = "                  key: %s" % actual_key
+    fixed = "\n".join(fixed_lines) + "\n"
+    wfile(fs, manifest, broken)
+
+    put_fixture(fixtures, "kubectl_get_pods.txt", "\n".join([
+        "NAME                                     READY   STATUS             RESTARTS   AGE",
+        "%-40s 0/1     CrashLoopBackOff   %-9d 42m" % (pod, restarts),
+    ]) + "\n", "k8s-crashloop")
+    put_fixture(fixtures, "kubectl_describe_pod.txt", "\n".join([
+        "Name:             %s" % pod,
+        "Namespace:        %s" % ns,
+        "Labels:           app=%s" % dep,
+        "Status:           Running",
+        "Containers:",
+        "  api:",
+        "    Image:        registry.example/svc-api:1.4.2",
+        "    State:        Waiting  (CrashLoopBackOff)",
+        "    Last State:   Terminated  (Error, exit code 1)",
+        "    Environment:",
+        "      DB_HOST:  <set from configmap %s, key %s>" % (cm, missing_key),
+        "      (configMapKeyRef name=%s key=%s)" % (cm, missing_key),
+        "Events:  <use `kubectl get events` for details>",
+    ]) + "\n", "k8s-crashloop")
+    log_lines = []
+    for attempt in range(1, 7):
+        log_lines.append("%s api: starting svc-api 1.4.2 (attempt %d)" % (ts(rng), attempt))
+        log_lines.append("%s api: FATAL config lookup failed: key '%s' is missing in configmap '%s'; reason %s"
+                         % (ts(rng), missing_key, cm, reason))
+        log_lines.append("%s api: exiting with status 1" % ts(rng))
+    put_fixture(fixtures, "kubectl_logs.txt", "\n".join(log_lines) + "\n", "k8s-crashloop")
+    put_fixture(fixtures, "kubectl_get_events.txt", "\n".join([
+        "LAST SEEN   TYPE      REASON    OBJECT          MESSAGE",
+        "2m          Warning   BackOff   pod/%s  Back-off restarting failed container (code %s)"
+        % (pod, reason),
+        "3m          Warning   ConfigKey pod/%s  configmap '%s' defines key '%s' but the pod references a different key"
+        % (pod, cm, actual_key),
+        "5m          Normal    Pulled    pod/%s  Container image already present" % pod,
+        "6m          Warning   Unhealthy pod/%s  Readiness probe failed" % pod,
+    ]) + "\n", "k8s-crashloop")
+    put_fixture(fixtures, "kubectl_get_configmap.txt", "\n".join([
+        "Name:         %s" % cm,
+        "Namespace:    %s" % ns,
+        "Data",
+        "====",
+        "%s: %s" % (actual_key, db_value),
+    ]) + "\n", "k8s-crashloop")
+    put_fixture(fixtures, "kubectl_get_deploy.txt", "\n".join([
+        "NAME                 READY   UP-TO-DATE   AVAILABLE   AGE",
+        "%-20s 0/1     1            0           42m" % dep,
+    ]) + "\n", "k8s-crashloop")
+
+    if missing_key == actual_key or missing_key not in fixtures["kubectl_logs.txt"]:
+        raise AssertionError("k8s-crashloop: missing key clue inconsistent")
+    if missing_key in fixtures["kubectl_get_configmap.txt"]:
+        raise AssertionError("k8s-crashloop: missing key must not exist in the configmap")
+    if actual_key not in fixtures["kubectl_get_configmap.txt"] or actual_key in broken:
+        raise AssertionError("k8s-crashloop: actual key clue/broken state inconsistent")
+    if reason not in fixtures["kubectl_logs.txt"]:
+        raise AssertionError("k8s-crashloop: crash reason code missing from logs")
+    if "CrashLoopBackOff" not in fixtures["kubectl_get_pods.txt"]:
+        raise AssertionError("k8s-crashloop: pod status is not CrashLoopBackOff")
+
+    pod_answer = "%s:%s" % (pod, reason)
+    checks = [
+        hash_check("k8s-crashloop-1", pod_answer,
+                   "Submit the crashing pod name and its crash reason code, joined by a "
+                   "colon (pod first), as found in kubectl get pods and kubectl logs."),
+        hash_check("k8s-crashloop-2", missing_key,
+                   "Submit the config key the container says is missing in its logs."),
+        file_check("k8s-crashloop-3", manifest, fixed, actual_key,
+                   "Repair %s in place: change only the configMapKeyRef key to the key "
+                   "actually present in the configmap." % manifest,
+                   initial=broken),
+    ]
+    instr = (
+        "A pod in namespace %s is in CrashLoopBackOff. Use `kubectl get pods`, "
+        "`kubectl describe pod <pod>`, `kubectl logs <pod>`, `kubectl get events` and "
+        "`kubectl get configmap <name>` to find the crashing pod, its crash reason code, "
+        "the config key the container asks for, and the key the configmap actually holds.\n\n"
+        "The deployment manifest to repair is %s. Its corrected end state is "
+        "byte-for-byte the shipped file with exactly one change: the "
+        "configMapKeyRef `key` value becomes the key actually present in the configmap. "
+        "Leave every other line (including the env var name and configmap name) unchanged "
+        "and edit the file in place."
+        % (ns, manifest)
+    )
+    hints = [
+        "Checklist: kubectl get pods shows the status; kubectl describe pod <pod> shows "
+        "which configmap key the container environment requests.",
+        "Checklist: kubectl logs <pod> and kubectl get events show the crash reason; "
+        "kubectl get configmap <name> lists the real keys.",
+        "Checklist: edit the configMapKeyRef key line in the manifest in place with nano; "
+        "the env var name and configmap name are not the problem.",
+    ]
+    return instr, hints, checks
+
+
+# ---------------------------------------------------------------------------
 # output assembly
 # ---------------------------------------------------------------------------
 
-def build_stage(tid, seed, fsroot):
+def build_stage(tid, seed, fsroot, fixtures=None):
     t_rng_seed = int.from_bytes(
         hashlib.sha256(("%s|%s" % (seed, tid)).encode("utf-8")).digest()[:8], "big"
     )
     rng = random.Random(t_rng_seed)
-    instr, hints, checks = TEMPLATES[tid](rng, fsroot)
+    if fixtures is not None and tid in TROUBLESHOOT_TEMPLATES:
+        instr, hints, checks = TROUBLESHOOT_TEMPLATES[tid](rng, fsroot, fixtures)
+    else:
+        instr, hints, checks = TEMPLATES[tid](rng, fsroot)
     frags = [c["fragment"] for c in checks]
     flag = "FLAG{" + sha_text("|".join(frags))[:12] + "}"
     return {
@@ -877,17 +1219,39 @@ def _dump_check(c):
     return row
 
 
-def write_outputs(seed, count, out, dump_path):
+def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
     fsroot = os.path.join(out, "fs")
     os.makedirs(fsroot, exist_ok=True)
     stagesdir = os.path.join(out, "stages")
     os.makedirs(stagesdir, exist_ok=True)
 
-    sel = random.Random(seed)
-    order = sel.sample(ALL_IDS, count)
-    sel.shuffle(order)
+    fixtures = None
+    if profile == "troubleshoot":
+        if pick:
+            # Explicit order wins; --set is ignored and becomes len(pick).
+            order = list(pick)
+            count = len(order)
+        else:
+            sel = random.Random(seed)
+            order = sel.sample(TROUBLESHOOT_IDS, count)
+            sel.shuffle(order)
+        fixtures = {}
+        stages = [build_stage(tid, seed, fsroot, fixtures) for tid in order]
 
-    stages = [build_stage(tid, seed, fsroot) for tid in order]
+        fixturesdir = os.path.join(out, "fixtures")
+        os.makedirs(fixturesdir, exist_ok=True)
+        for name in FIXTURE_NAMES:
+            content = fixtures.get(name, NEUTRAL_FIXTURE)
+            with open(os.path.join(fixturesdir, name), "w",
+                      encoding="utf-8", newline="\n") as fh:
+                fh.write(content)
+    else:
+        # Terminal profile: the original selection and stage construction,
+        # byte-for-byte, with no fixtures directory.
+        sel = random.Random(seed)
+        order = sel.sample(ALL_IDS, count)
+        sel.shuffle(order)
+        stages = [build_stage(tid, seed, fsroot) for tid in order]
 
     manifest = ["SEED %d" % seed, "STAGES %d" % len(stages)]
     manifest += ["STAGE " + s["id"] for s in stages]
@@ -1090,6 +1454,10 @@ def main(argv=None):
     ap.add_argument("--out", default=None, help="output directory")
     ap.add_argument("--dump-answers", dest="dump", default=None,
                     help="write test-only plaintext answers JSON here")
+    ap.add_argument("--profile", choices=["terminal", "troubleshoot"], default="terminal",
+                    help="challenge profile (default: terminal, unchanged output)")
+    ap.add_argument("--pick", dest="pick", default=None, metavar="ID1,ID2",
+                    help="troubleshoot only: use exactly these template ids, in this order")
     ap.add_argument("--self-test", dest="self_test", metavar="SEEDS", default=None,
                     help="generate a full set for each comma-separated seed and "
                          "cross-check every answer against the artefacts on disk")
@@ -1106,10 +1474,31 @@ def main(argv=None):
 
     if args.seed is None or args.set_size is None or args.out is None:
         ap.error("--seed, --set and --out are required (unless --self-test is used)")
-    if not 1 <= args.set_size <= len(ALL_IDS):
+
+    pick = None
+    if args.pick is not None:
+        if args.profile != "troubleshoot":
+            ap.error("--pick is only valid with --profile troubleshoot")
+        pick = [part.strip() for part in args.pick.split(",") if part.strip()]
+        if len(pick) != len(set(pick)):
+            ap.error("--pick must not contain duplicate template ids")
+        unknown = [tid for tid in pick if tid not in TROUBLESHOOT_IDS]
+        if unknown:
+            ap.error("unknown troubleshoot template id(s): %s (choose from %s)"
+                     % (", ".join(unknown), ", ".join(TROUBLESHOOT_IDS)))
+        if not pick:
+            ap.error("--pick must name at least one template id")
+
+    if args.profile == "troubleshoot":
+        if pick is None and not 1 <= args.set_size <= len(TROUBLESHOOT_IDS):
+            ap.error("--set must be between 1 and %d without --pick" % len(TROUBLESHOOT_IDS))
+    elif not 1 <= args.set_size <= len(ALL_IDS):
         ap.error("--set must be between 1 and %d" % len(ALL_IDS))
 
-    stages, order, final_flag = write_outputs(args.seed, args.set_size, args.out, args.dump)
+    stages, order, final_flag = write_outputs(
+        args.seed, args.set_size, args.out, args.dump,
+        profile=args.profile, pick=pick,
+    )
     print("seed=%d stages=%d order=%s final_flag=%s" % (
         args.seed, len(stages), ",".join(order), final_flag
     ))
