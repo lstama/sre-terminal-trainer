@@ -8,7 +8,7 @@
 # paths and byte-for-byte passthrough.
 #
 # Part 2 (runs when the generator has --profile support): generate the default
-# fourteen-template pool and ordered PICK subsets, then assert the fixture contract,
+# sixteen-template pool and ordered PICK subsets, then assert the fixture contract,
 # manifests, checks.tsv shape, stage/final flag recomputation, generated scenario
 # clues and that no file check ships already solved. If the generator has no
 # troubleshoot profile yet, part 2 is reported as pending (a SKIP, not a failure).
@@ -438,6 +438,14 @@ def snapshot(name, label):
     return text.split(marker, 1)[1].split("\n\n# snapshot ", 1)[0].strip() + "\n"
 
 
+def labelled_report(name, label):
+    marker = "# " + label + "\n"
+    text = fixture(name)
+    if marker not in text:
+        return ""
+    return text.split(marker, 1)[1].split("\n\n# ", 1)[0].strip() + "\n"
+
+
 # The T16 fixture contract: every name is always emitted, flat, nothing else.
 FIXTURES = [
     "systemctl_status.txt", "journalctl_unit.txt", "journalctl_xe.txt",
@@ -453,7 +461,7 @@ FIXTURES = [
 POOL = ["svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
         "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict",
         "oom-kill", "image-pull", "svc-selector", "resource-limits",
-        "tls-expiry", "dependency-down"]
+        "tls-expiry", "dependency-down", "blocked-port", "perm-denied"]
 NEUTRAL = "no data for this scenario\n"
 PICK = pick_arg.split(",") if pick_arg else None
 expected_count = len(PICK) if PICK else len(POOL)
@@ -487,7 +495,7 @@ if PICK:
 else:
     emit(len(stage_lines) == len(POOL) and len(set(stage_lines)) == len(POOL)
          and set(stage_lines) == set(POOL),
-         "default generation selects each of the fourteen templates exactly once",
+         "default generation selects each of the sixteen templates exactly once",
          repr(stage_lines))
     emit(dump.get("order") == stage_lines,
          "answers dump order matches the default manifest order", repr(dump.get("order")))
@@ -893,9 +901,14 @@ for index, sid in enumerate(stage_lines, 1):
         emit("nginx -t" in instruction and "ls -l" in instruction,
              "nginx-config: instruction teaches nginx -t and ls -l")
         if "selinux-avc" in stage_lines:
-            emit(fixture("getenforce.txt") == "Enforcing\n"
-                 and "avc: denied" in fixture("ausearch_avc.txt"),
+            mode = labelled_report("getenforce.txt", "getenforce (selinux-avc)")
+            emit(mode == "Enforcing\n" and "avc: denied" in fixture("ausearch_avc.txt"),
                  "nginx-config: shared SELinux fixtures preserve the selected AVC denial")
+        elif "perm-denied" in stage_lines:
+            mode = labelled_report("getenforce.txt", "getenforce (perm-denied)")
+            avc = labelled_report("ausearch_avc.txt", "ausearch -m avc (perm-denied)")
+            emit(mode == "Permissive\n" and avc == "----\n<no matches>\n",
+                 "nginx-config: shared permission fixtures preserve permissive/no-AVC evidence")
         else:
             emit(fixture("getenforce.txt") in ("Permissive\n", "Disabled\n")
                  and fixture("ausearch_avc.txt") != NEUTRAL,
@@ -957,7 +970,8 @@ for index, sid in enumerate(stage_lines, 1):
              "selinux-avc: two hash checks precede the file check")
         emit(re.fullmatch(r"/etc/([^/]+)/\1\.conf", checked_path) is not None,
              "selinux-avc: checked config follows /etc/<svc>/<svc>.conf")
-        emit(fixture("getenforce.txt") == "Enforcing\n" and len(denials) >= 2,
+        mode = labelled_report("getenforce.txt", "getenforce (selinux-avc)")
+        emit(mode == "Enforcing\n" and len(denials) >= 2,
              "selinux-avc: enforcing mode and repeated AVC denials are present")
         emit(bool(denied_path) and denied_path in avc
              and all(fragment in line and denied_path in line for line in denials),
@@ -1034,6 +1048,123 @@ for index, sid in enumerate(stage_lines, 1):
              and holder not in hint_text and held_port not in hint_text
              and (not free_value or free_value not in hint_text),
              "port-conflict: instruction and hints do not reveal answers")
+
+    if sid == "blocked-port":
+        blocked_checks = dumped
+        target_host = blocked_checks[0]["answer"]
+        failure_fragment = blocked_checks[1]["answer"]
+        checked_path = blocked_checks[2]["path"]
+        fixed_text = blocked_checks[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        host_match = re.search(r"^target_host = (.+)$", initial_text, re.MULTILINE)
+        blocked_match = re.search(r"^bind_port = (\d+)$", initial_text, re.MULTILINE)
+        allowed_match = re.search(r"^bind_port = (\d+)$", fixed_text, re.MULTILINE)
+        timeout_match = re.search(r"^connect_timeout_ms = (\d+)$", initial_text, re.MULTILINE)
+        service_match = re.search(r"^service_name = (.+)$", initial_text, re.MULTILINE)
+        configured_host = host_match.group(1) if host_match else ""
+        blocked_port = blocked_match.group(1) if blocked_match else ""
+        allowed_port = allowed_match.group(1) if allowed_match else ""
+        timeout_ms = timeout_match.group(1) if timeout_match else ""
+        service_process = service_match.group(1) + "-listener" if service_match else ""
+        nc_text = fixture("nc_zv.txt")
+        ss_text = fixture("ss_tlnp.txt")
+        curl_text = fixture("curl_v.txt")
+        ping_text = fixture("ping.txt")
+        dig_text = fixture("dig.txt")
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "blocked-port: two hash checks precede the file check")
+        emit(re.fullmatch(r"/etc/([^/]+)/\1\.conf", checked_path) is not None
+             and configured_host == target_host,
+             "blocked-port: checked config follows /etc/<svc>/<svc>.conf and names the host")
+        emit(bool(blocked_port) and bool(allowed_port) and blocked_port != allowed_port
+             and fixed_text == initial_text.replace("bind_port = " + blocked_port,
+                                                     "bind_port = " + allowed_port),
+             "blocked-port: repair changes only the blocked port to the allowed listener")
+        emit(target_host in nc_text and blocked_port in nc_text
+             and failure_fragment in nc_text and "Connection timed out" in nc_text,
+             "blocked-port: nc shows the target, blocked port, timeout and fragment")
+        emit(target_host in curl_text and blocked_port in curl_text
+             and failure_fragment in curl_text and "Connection timed out" in curl_text
+             and bool(timeout_ms) and ("after " + timeout_ms + " milliseconds") in curl_text,
+             "blocked-port: curl corroborates the connect timeout and fragment")
+        emit(bool(service_process) and service_process in ss_text
+             and (":" + allowed_port) in ss_text and (":" + blocked_port) not in ss_text,
+             "blocked-port: ss shows the service listener but not the configured port")
+        emit(target_host in ping_text and "0% packet loss" in ping_text
+             and target_host in dig_text and " IN A " in dig_text,
+             "blocked-port: ping/DNS establish host reachability separately from the port")
+        emit(all(command in instruction for command in
+                  ("nc -zv", "ss -tlnp", "curl -v", "ping")),
+             "blocked-port: instruction teaches the network triage checklist")
+        emit(target_host not in instruction and failure_fragment not in instruction
+             and ("bind_port = " + allowed_port) not in instruction
+             and target_host not in hint_text and failure_fragment not in hint_text
+             and ("bind_port = " + allowed_port) not in hint_text,
+             "blocked-port: instruction and hints do not reveal answers")
+
+    if sid == "perm-denied":
+        perm_checks = dumped
+        denied_answer = perm_checks[0]["answer"]
+        owner = perm_checks[1]["answer"]
+        checked_path = perm_checks[2]["path"]
+        fixed_text = perm_checks[2]["answer"]
+        denied_path, _, fragment = denied_answer.partition(":")
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        denied_match = re.search(r"^data_path = (.+)$", initial_text, re.MULTILINE)
+        reference_match = re.search(r"^data_path = (.+)$", fixed_text, re.MULTILINE)
+        configured_path = denied_match.group(1) if denied_match else ""
+        reference_path = reference_match.group(1) if reference_match else ""
+        unit = os.path.basename(checked_path)[:-5] + ".service"
+        status = fixture("systemctl_status.txt")
+        journal = fixture("journalctl_unit.txt")
+        denial_lines = [line for line in journal.splitlines() if "Permission denied" in line]
+        source_lines = [re.search(re.escape(denied_path) + r":(\d+)", line)
+                        for line in denial_lines]
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "perm-denied: two hash checks precede the file check")
+        emit(re.fullmatch(r"/etc/([^/]+)/\1\.conf", checked_path) is not None
+             and configured_path == denied_path,
+             "perm-denied: checked config follows /etc/<svc>/<svc>.conf and names the denied path")
+        emit(bool(reference_path) and reference_path != denied_path
+             and fixed_text == initial_text.replace("data_path = " + denied_path,
+                                                     "data_path = " + reference_path),
+             "perm-denied: repair changes only data_path to the readable reference")
+        emit(len(denial_lines) >= 2 and all(denied_path in line and fragment in line
+                                            for line in denial_lines),
+             "perm-denied: journal repeats Permission denied with the checked path/fragment")
+        denied_file = os.path.join(out, "fs", denied_path.lstrip("/"))
+        with open(denied_file, encoding="utf-8") as fh:
+            denied_data = fh.read()
+        emit(all(match is not None and 2 <= int(match.group(1)) <= len(denied_data.splitlines())
+                 for match in source_lines),
+             "perm-denied: randomized journal source line exists in the denied file")
+        emit("Active: failed" in status and unit in status and fragment in status
+             and unit in journal,
+             "perm-denied: unit status and journal identify the same failure")
+        mode = labelled_report("getenforce.txt", "getenforce (perm-denied)")
+        avc = labelled_report("ausearch_avc.txt", "ausearch -m avc (perm-denied)")
+        emit(mode == "Permissive\n" and avc == "----\n<no matches>\n",
+             "perm-denied: permissive mode and no AVC rule out SELinux")
+        reference_file = os.path.join(out, "fs", reference_path.lstrip("/"))
+        with open(reference_file, encoding="utf-8") as fh:
+            reference_text = fh.read()
+        emit(owner == "nginx" and reference_path.startswith("/srv/sre-trainer/references/")
+             and (os.stat(reference_file).st_mode & 0o777) == 0o644
+             and (os.stat(denied_file).st_mode & 0o777) == 0o600
+             and "owner" not in reference_text.lower(),
+             "perm-denied: reference is readable and relies on real ownership metadata")
+        emit(all(command in instruction for command in
+                  ("systemctl status", "journalctl -u", "ls -l", "stat",
+                   "getenforce", "ausearch -m avc")),
+             "perm-denied: instruction teaches the permission triage checklist")
+        emit(denied_path not in instruction and fragment not in instruction
+             and owner not in instruction and denied_path not in hint_text
+             and fragment not in hint_text and owner not in hint_text,
+             "perm-denied: instruction and hints do not reveal answers")
 
     if sid == "oom-kill":
         killed_answer = dumped[0]["answer"]
@@ -1210,7 +1341,7 @@ PY
         fi
     }
 
-    run_generator_case "default fourteen-template troubleshoot generation" default 14
+    run_generator_case "default sixteen-template troubleshoot generation" default 16
     run_generator_case "original two-template PICK" pilot-pick 2 \
         svc-crashloop,k8s-crashloop
     # A reversed, non-pool order and a deliberately different SET prove PICK
@@ -1258,6 +1389,38 @@ PY
     else
         bad "mixed shared-evidence fixture bytes differ between forward and reversed PICK"
         sed 's/^/        | /' "$WORK/mixed-wave7-fixture-diff.log"
+    fi
+    run_generator_case "wave-eight two-template PICK" wave8-pick 1 \
+        blocked-port,perm-denied
+    run_generator_case "wave-eight PICK reversed with SET override" wave8-reversed 99 \
+        perm-denied,blocked-port
+    if diff -r "$WORK/gen-wave8-pick/fixtures" "$WORK/gen-wave8-reversed/fixtures" \
+            >"$WORK/wave8-fixture-diff.log" 2>&1; then
+        ok "wave-eight fixture bytes are independent of PICK order"
+    else
+        bad "wave-eight fixture bytes differ between forward and reversed PICK"
+        sed 's/^/        | /' "$WORK/wave8-fixture-diff.log"
+    fi
+    run_generator_case "mixed wave-eight shared-evidence PICK" wave8-mixed 1 \
+        blocked-port,perm-denied,selinux-avc,nginx-config,dns-mismatch,dependency-down,port-conflict,svc-crashloop
+    run_generator_case "mixed wave-eight shared-evidence PICK reversed" wave8-mixed-reversed 16 \
+        svc-crashloop,port-conflict,dependency-down,dns-mismatch,nginx-config,selinux-avc,perm-denied,blocked-port
+    if diff -r "$WORK/gen-wave8-mixed/fixtures" "$WORK/gen-wave8-mixed-reversed/fixtures" \
+            >"$WORK/mixed-wave8-fixture-diff.log" 2>&1; then
+        ok "mixed wave-eight fixture bytes are independent of PICK order"
+    else
+        bad "mixed wave-eight fixture bytes differ between forward and reversed PICK"
+        sed 's/^/        | /' "$WORK/mixed-wave8-fixture-diff.log"
+    fi
+    if python3 "$GEN" --seed "$SEED" --set 17 --profile troubleshoot \
+            --out "$WORK/gen-invalid-set" >"$WORK/gen-invalid-set.log" 2>&1; then
+        bad "troubleshoot SET=17 must be rejected"
+    elif grep -F -- "between 1 and 16" "$WORK/gen-invalid-set.log" >/dev/null 2>&1 \
+            && [ ! -e "$WORK/gen-invalid-set" ]; then
+        ok "troubleshoot SET=17 is rejected early with the 1..16 range"
+    else
+        bad "troubleshoot SET=17 rejection lacks the range or creates output"
+        sed 's/^/        | /' "$WORK/gen-invalid-set.log"
     fi
     if diff -r "$WORK/gen-wave6-pick/fixtures" "$WORK/gen-wave6-reversed/fixtures" \
             >"$WORK/wave6-fixture-diff.log" 2>&1; then

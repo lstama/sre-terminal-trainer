@@ -853,7 +853,7 @@ TROUBLESHOOT_IDS = [
     "svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
     "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict",
     "oom-kill", "image-pull", "svc-selector", "resource-limits",
-    "tls-expiry", "dependency-down",
+    "tls-expiry", "dependency-down", "blocked-port", "perm-denied",
 ]
 TROUBLESHOOT_TEMPLATES = {}
 
@@ -938,10 +938,10 @@ def merge_k8s_reports(left, right):
 def merge_labelled_reports(left, right):
     """Merge labelled command reports associatively without losing any evidence.
 
-    Status, journal, DNS, ping and nc fixtures can be requested by several
-    selected drills.  Each report starts with a ``# <command ...>`` line; parse
-    those boundaries rather than treating an already-merged fixture as one
-    opaque report.  Sorting makes the result independent of PICK order.
+    Status, journal, enforcement/AVC, DNS, ping and nc fixtures can be requested
+    by several selected drills.  Each report starts with a ``# <command ...>``
+    line; parse those boundaries rather than treating an already-merged fixture
+    as one opaque report.  Sorting makes the result independent of PICK order.
     """
     reports = set()
     for text in (left, right):
@@ -2526,7 +2526,9 @@ def t_selinux_avc(rng, fs, fixtures, soft):
     ]) + "\n"
     wfile(fs, reference, reference_text, mode=0o644)
 
-    put_fixture(fixtures, "getenforce.txt", "Enforcing\n", "selinux-avc")
+    mode_report = "# getenforce (selinux-avc)\nEnforcing\n"
+    put_fixture_merged(fixtures, "getenforce.txt", mode_report,
+                       "selinux-avc", merge_labelled_reports)
     denial_lines = []
     for attempt in range(rng.randint(2, 4)):
         denial_lines.append(
@@ -2537,7 +2539,7 @@ def t_selinux_avc(rng, fs, fixtures, soft):
                fragment, os.path.basename(denied_path), denied_path,
                rng.randint(10000, 999999), source_context, wrong_context)
         )
-    ausearch = "\n".join(denial_lines + [
+    ausearch = "# ausearch -m avc (selinux-avc)\n" + "\n".join(denial_lines + [
         'type=SYSCALL msg=audit(1795500000.001:%d): syscall=openat success=no '
         'exe="/usr/local/bin/%s" subj=%s' % (serial, fragment, source_context),
         'type=AVC msg=audit(1795500001.001:%d): avc: granted { read open } '
@@ -2546,7 +2548,8 @@ def t_selinux_avc(rng, fs, fixtures, soft):
         % (serial + 10, process_pid, fragment, allowed_path,
            rng.randint(10000, 999999), source_context, correct_context),
     ]) + "\n"
-    put_fixture(fixtures, "ausearch_avc.txt", ausearch, "selinux-avc")
+    put_fixture_merged(fixtures, "ausearch_avc.txt", ausearch,
+                       "selinux-avc", merge_labelled_reports)
 
     if denied_path == allowed_path or wrong_context == correct_context:
         raise AssertionError("selinux-avc: denied/allowed evidence is not distinct")
@@ -2554,7 +2557,7 @@ def t_selinux_avc(rng, fs, fixtures, soft):
         raise AssertionError("selinux-avc: broken config does not point only at the denied path")
     if fixed != broken.replace(denied_path, allowed_path) or fixed == broken:
         raise AssertionError("selinux-avc: repair is not a path-only change")
-    if fixtures["getenforce.txt"] != "Enforcing\n":
+    if mode_report not in fixtures["getenforce.txt"]:
         raise AssertionError("selinux-avc: SELinux is not enforcing")
     if sum('avc: denied { read open }' in line for line in denial_lines) != len(denial_lines):
         raise AssertionError("selinux-avc: denial lines missing")
@@ -2699,6 +2702,275 @@ def t_port_conflict(rng, fs, fixtures, soft):
         "diagnostic token; it corroborates the endpoint but does not choose the repair.",
         "Checklist: the port-planner row in ps aux names a proposed free port for the "
         "service; confirm it is absent from ss, then change only bind_port with nano.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("blocked-port")
+def t_blocked_port(rng, fs, fixtures, soft):
+    """Network triage: a reachable host whose configured TCP port is filtered."""
+    svc = tok(rng, "fwsvc", 6)
+    cfg = "/etc/%s/%s.conf" % (svc, svc)
+    target_host = "edge-%s.internal.example" % hexs(rng, 8)
+    target_ip = ip(rng)
+    # Keep these ranges disjoint from the other socket drills' generated ports.
+    blocked_port = rng.randint(60000, 64999)
+    allowed_port = rng.randint(50000, 50999)
+    timeout_ms = rng.randint(2000, 9000)
+    fragment = tok(rng, "blocked", 8)
+    service_process = svc + "-listener"
+    service_pid = rng.randint(1200, 9000)
+    service_fd = rng.randint(8, 40)
+
+    broken_lines = [
+        "# %s service configuration (managed by ops)" % svc,
+        "service_name = %s" % svc,
+        "target_host = %s" % target_host,
+        "bind_port = %d" % blocked_port,
+        "connect_timeout_ms = %d" % timeout_ms,
+        "retry_count = 3",
+        "log_level = warn",
+    ]
+    fixed_lines = list(broken_lines)
+    fixed_lines[3] = "bind_port = %d" % allowed_port
+    broken = "\n".join(broken_lines) + "\n"
+    fixed = "\n".join(fixed_lines) + "\n"
+    wfile(fs, cfg, broken, mode=0o666)
+
+    nc_report = "\n".join([
+        "# nc -zv %s %d" % (target_host, blocked_port),
+        "nc: connect to %s (%s) port %d (tcp) failed: Connection timed out"
+        % (target_host, target_ip, blocked_port),
+        "connection %s: timed out" % fragment,
+    ]) + "\n"
+    put_fixture_merged(fixtures, "nc_zv.txt", nc_report,
+                       "blocked-port", merge_labelled_reports)
+    curl_report = "\n".join([
+        "# curl -v http://%s:%d/health" % (target_host, blocked_port),
+        "*   Trying %s:%d..." % (target_ip, blocked_port),
+        "* connect to %s (%s) port %d failed: Connection timed out"
+        % (target_host, target_ip, blocked_port),
+        "* Connection timed out after %d milliseconds" % timeout_ms,
+        "* connection %s: timed out" % fragment,
+        "* Closing connection 0",
+    ]) + "\n\n"
+    put_fixture_merged(fixtures, "curl_v.txt", curl_report,
+                       "blocked-port", merge_curl_fixtures)
+    put_fixture_merged(fixtures, "ss_tlnp.txt", "\n".join([
+        "State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process",
+        'LISTEN  0       128     0.0.0.0:%-11d 0.0.0.0:*          users:(("%s",pid=%d,fd=%d))'
+        % (allowed_port, service_process, service_pid, service_fd),
+        'LISTEN  0       128     127.0.0.1:22       0.0.0.0:*          users:(("sshd",pid=411,fd=3))',
+    ]) + "\n", "blocked-port", merge_ss_fixtures)
+    put_fixture_merged(fixtures, "ping.txt", "\n".join([
+        "# ping %s" % target_host,
+        "PING %s (%s) 56(84) bytes of data." % (target_host, target_ip),
+        "64 bytes from %s (%s): icmp_seq=1 ttl=62 time=2.4 ms"
+        % (target_host, target_ip),
+        "64 bytes from %s (%s): icmp_seq=2 ttl=62 time=2.1 ms"
+        % (target_host, target_ip),
+        "",
+        "--- %s ping statistics ---" % target_host,
+        "2 packets transmitted, 2 received, 0% packet loss, time 1001ms",
+    ]) + "\n", "blocked-port", merge_labelled_reports)
+    put_fixture_merged(fixtures, "dig.txt", "\n".join([
+        "# dig %s A" % target_host,
+        "; <<>> DiG 9.18.1 <<>> %s A" % target_host,
+        ";; global options: +cmd",
+        ";; Got answer:",
+        ";; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: %s" % hexs(rng, 4),
+        "",
+        ";; ANSWER SECTION:",
+        "%s. 60 IN A %s" % (target_host, target_ip),
+    ]) + "\n", "blocked-port", merge_labelled_reports)
+
+    if blocked_port == allowed_port or fixed == broken:
+        raise AssertionError("blocked-port: blocked/allowed ports are not distinct")
+    if fixed != broken.replace("bind_port = %d" % blocked_port,
+                               "bind_port = %d" % allowed_port):
+        raise AssertionError("blocked-port: repair is not a bind_port-only change")
+    if target_host not in broken or str(allowed_port) in broken:
+        raise AssertionError("blocked-port: broken config does not contain only the blocked endpoint")
+    ss_text = fixtures["ss_tlnp.txt"]
+    if service_process not in ss_text or (":%d" % allowed_port) not in ss_text:
+        raise AssertionError("blocked-port: service's allowed listener is missing from ss")
+    if (":%d" % blocked_port) in ss_text:
+        raise AssertionError("blocked-port: configured port unexpectedly appears in ss")
+    if target_host not in fixtures["nc_zv.txt"] or fragment not in fixtures["nc_zv.txt"] \
+            or "Connection timed out" not in fixtures["nc_zv.txt"]:
+        raise AssertionError("blocked-port: nc timeout evidence is incomplete")
+    if target_host not in fixtures["curl_v.txt"] or fragment not in fixtures["curl_v.txt"] \
+            or "Connection timed out" not in fixtures["curl_v.txt"]:
+        raise AssertionError("blocked-port: curl timeout evidence is incomplete")
+    if target_host not in fixtures["ping.txt"] or "0% packet loss" not in fixtures["ping.txt"]:
+        raise AssertionError("blocked-port: ping does not establish host reachability")
+    if target_host not in fixtures["dig.txt"] or target_ip not in fixtures["dig.txt"]:
+        raise AssertionError("blocked-port: DNS evidence does not resolve the target host")
+
+    checks = [
+        hash_check("blocked-port-1", target_host,
+                   "Submit the target hostname from the `nc -zv` connection report."),
+        hash_check("blocked-port-2", fragment,
+                   "Submit the connection diagnostic token printed by both `curl -v` "
+                   "and `nc -zv`."),
+        file_check("blocked-port-3", cfg, fixed, "firewall-" + svc,
+                   "Repair %s in place: change only `bind_port` to the service's "
+                   "listening port shown by `ss -tlnp`." % cfg,
+                   initial=broken),
+    ]
+    instr = (
+        "A service endpoint is unreachable even though its host responds. Read the checked "
+        "config at %s, then use its `target_host` and `bind_port` with `nc -zv <host> <port>` "
+        "and `curl -v <url>` to inspect the TCP failure. Use `ping <host>` to test host "
+        "reachability separately from port availability, optionally `dig <host> A` to "
+        "corroborate the address, and `ss -tlnp` to compare the configured port with the "
+        "service's actual listener.\n\n"
+        "The corrected config is byte-for-byte the shipped file with exactly one change: "
+        "`bind_port` becomes the service's listening port revealed by `ss -tlnp`. Leave the "
+        "target host, timeout, retry count, log level, comment and every other byte unchanged, "
+        "and edit the file in place." % cfg
+    )
+    hints = [
+        "Checklist: nc -zv reports the target host, port and transport failure; curl -v "
+        "corroborates the timeout and prints the same diagnostic token.",
+        "Checklist: ping tests host reachability, not a TCP service. ss -tlnp shows the "
+        "service process and the port it actually listens on; dig can confirm name resolution.",
+        "Checklist: compare the configured bind_port with that listener, then change only "
+        "bind_port in nano. Ctrl+O writes in place and Ctrl+X exits.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("perm-denied")
+def t_perm_denied(rng, fs, fixtures, soft):
+    """Permission triage: a root-only data path, not SELinux, blocks a service."""
+    svc = tok(rng, "persvc", 6)
+    unit = svc + ".service"
+    cfg = "/etc/%s/%s.conf" % (svc, svc)
+    denied_path = "/srv/%s/private/%s.dat" % (svc, tok(rng, "payload", 8))
+    reference = "/srv/sre-trainer/references/%s-%s.conf" % (svc, tok(rng, "readable", 8))
+    fragment = tok(rng, "perm", 8)
+    process_pid = rng.randint(1800, 12000)
+    denied_line_count = rng.randint(28, 96)
+    denied_line = rng.randint(2, denied_line_count)
+
+    broken_lines = [
+        "# %s data reader configuration (managed by ops)" % svc,
+        "service_name = %s" % svc,
+        "data_path = %s" % denied_path,
+        "retry_count = 3",
+        "log_level = warn",
+    ]
+    fixed_lines = list(broken_lines)
+    fixed_lines[2] = "data_path = %s" % reference
+    broken = "\n".join(broken_lines) + "\n"
+    fixed = "\n".join(fixed_lines) + "\n"
+    wfile(fs, cfg, broken, mode=0o666)
+    denied_lines = ["# private data for %s" % svc]
+    denied_lines.extend("record-%03d = %s" % (i, hexs(rng, 8))
+                        for i in range(2, denied_line_count + 1))
+    wfile(fs, denied_path, "\n".join(denied_lines) + "\n", mode=0o600)
+    reference_text = "\n".join([
+        "# readable reference for %s" % svc,
+        "service_name = %s" % svc,
+        "dataset = release-%s" % hexs(rng, 10),
+        "schema_version = 2",
+    ]) + "\n"
+    # The troubleshoot image chowns this tree to nginx:nginx, so ls -l/stat
+    # expose real ownership while the denied path remains root-only mode 0600.
+    wfile(fs, reference, reference_text, mode=0o644)
+
+    status = "\n".join([
+        "# systemctl status %s" % unit,
+        "* %s - %s data reader" % (unit, svc),
+        "     Loaded: loaded (/etc/systemd/system/%s; enabled)" % unit,
+        "     Active: failed (Result: exit-code) since 3min ago",
+        "   Main PID: %d (code=exited, status=1/FAILURE)" % process_pid,
+        "",
+        "%s %s[%d]: ERROR configured data_path %s is not readable; incident %s"
+        % (ts(rng), svc, process_pid, denied_path, fragment),
+        "%s systemd[1]: %s: Failed with result 'exit-code'." % (ts(rng), unit),
+    ]) + "\n"
+    put_fixture_merged(fixtures, "systemctl_status.txt", status,
+                       "perm-denied", merge_labelled_reports)
+    journal_lines = [
+        "# journalctl -u %s -n 100 --no-pager" % unit,
+        "-- unit %s --" % unit,
+    ]
+    for attempt in range(rng.randint(2, 4)):
+        journal_lines.append(
+            "%s %s[%d]: ERROR open %s:%d failed: Permission denied (incident %s)"
+            % (ts(rng), svc, process_pid + attempt, denied_path, denied_line, fragment)
+        )
+    journal_lines.extend([
+        "%s systemd[1]: %s: Main process exited, code=exited, status=1/FAILURE"
+        % (ts(rng), unit),
+        "%s systemd[1]: %s: Failed with result 'exit-code'." % (ts(rng), unit),
+    ])
+    journal = "\n".join(journal_lines) + "\n"
+    put_fixture_merged(fixtures, "journalctl_unit.txt", journal,
+                       "perm-denied", merge_labelled_reports)
+    mode_report = "# getenforce (perm-denied)\nPermissive\n"
+    put_fixture_merged(fixtures, "getenforce.txt", mode_report,
+                       "perm-denied", merge_labelled_reports)
+    avc_report = "# ausearch -m avc (perm-denied)\n----\n<no matches>\n"
+    put_fixture_merged(fixtures, "ausearch_avc.txt", avc_report,
+                       "perm-denied", merge_labelled_reports)
+
+    if denied_path == reference or fixed == broken:
+        raise AssertionError("perm-denied: denied/reference paths are not distinct")
+    if fixed != broken.replace("data_path = %s" % denied_path,
+                               "data_path = %s" % reference):
+        raise AssertionError("perm-denied: repair is not a data_path-only change")
+    if denied_path not in broken or reference in broken:
+        raise AssertionError("perm-denied: broken config does not point only at the denied path")
+    if not 2 <= denied_line <= denied_line_count:
+        raise AssertionError("perm-denied: journal line is outside the denied file")
+    if denied_path not in journal or fragment not in journal \
+            or ("Permission denied" not in journal):
+        raise AssertionError("perm-denied: journal denial evidence is incomplete")
+    if "Active: failed" not in status or unit not in status or fragment not in status:
+        raise AssertionError("perm-denied: unit status does not show the failure")
+    if mode_report not in fixtures["getenforce.txt"]:
+        raise AssertionError("perm-denied: SELinux permissive report is missing")
+    if avc_report not in fixtures["ausearch_avc.txt"]:
+        raise AssertionError("perm-denied: empty AVC report is missing")
+    if not reference.startswith("/srv/sre-trainer/references/") or "owner" in reference_text.lower():
+        raise AssertionError("perm-denied: reference must rely on real ownership metadata")
+
+    denied_answer = "%s:%s" % (denied_path, fragment)
+    checks = [
+        hash_check("perm-denied-1", denied_answer,
+                   "Submit the denied file path and incident fragment from "
+                   "`journalctl -u <unit>`, joined by a colon (path first)."),
+        hash_check("perm-denied-2", "nginx",
+                   "Submit the owner name shown by `ls -l` on the readable reference "
+                   "file, not its group name."),
+        file_check("perm-denied-3", cfg, fixed, "permission-" + svc,
+                   "Repair %s in place: replace only `data_path` with the readable "
+                   "reference file whose ownership you inspected." % cfg,
+                   initial=broken),
+    ]
+    instr = (
+        "A service unit failed while reading its configured data. Use `systemctl status "
+        "<unit>` and `journalctl -u <unit> -n 100 --no-pager` to identify the unit, denied "
+        "path, source line and incident fragment. Use `ls -l` and `stat` on the denied path "
+        "and the reference file at %s to compare ownership, mode and readability. Check "
+        "`getenforce` and `ausearch -m avc` to determine whether mandatory access control "
+        "is involved.\n\n"
+        "The checked config is %s. Its corrected end state is byte-for-byte the shipped file "
+        "with exactly one change: `data_path` becomes the readable reference file. Leave the "
+        "service name, retry count, log level, comment and every other byte unchanged, and "
+        "edit the file in place." % (reference, cfg)
+    )
+    hints = [
+        "Checklist: journalctl -u reports Permission denied with the full path, source line "
+        "and incident token; systemctl status confirms the unit failed.",
+        "Checklist: ls -l shows owner/group and mode bits, while stat gives numeric metadata. "
+        "getenforce and ausearch -m avc rule out SELinux when the mode is permissive and no "
+        "AVC matches are present.",
+        "Checklist: identify the readable, correctly owned reference with ls -l/stat, then "
+        "replace only data_path in nano. Ctrl+O writes in place and Ctrl+X exits.",
     ]
     return instr, hints, checks
 
@@ -3141,7 +3413,7 @@ def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
 # ---------------------------------------------------------------------------
 
 def self_test(seeds, verbose=True):
-    """Generate a full 16-stage terminal set *and* the 14-stage troubleshoot set
+    """Generate a full 16-stage terminal set *and* the 16-stage troubleshoot set
     per seed, then cross-foot every answer against the artefacts on disk.
 
     The templates assert their own load-bearing invariants while generating (e.g.
@@ -3150,7 +3422,7 @@ def self_test(seeds, verbose=True):
     order, file checks not shipped pre-solved, no answer dump under ``fs/``, the
     two drill-specific claims (top talker, config-drift baseline token), and for
     troubleshoot: the full 32-fixture contract, broken initial files, and
-    scenario-specific clue placement across all fourteen drills.
+    scenario-specific clue placement across all sixteen drills.
     """
     import re
     import tempfile
@@ -3170,6 +3442,12 @@ def self_test(seeds, verbose=True):
         if marker not in text:
             return ""
         return text.split(marker, 1)[1].split("\n\n# snapshot ", 1)[0]
+
+    def labelled_report(text, label):
+        marker = "# %s\n" % label
+        if marker not in text:
+            return ""
+        return text.split(marker, 1)[1].split("\n\n# ", 1)[0].strip() + "\n"
 
     for seed in seeds:
         with tempfile.TemporaryDirectory(prefix="sre-selftest.") as tmp:
@@ -3281,7 +3559,7 @@ def self_test(seeds, verbose=True):
                 check("answers.json" not in filenames,
                       "seed %d: answers.json leaked into %s" % (seed, dirpath))
 
-            # ---- troubleshoot profile: all fourteen templates, all 32 fixtures ----
+            # ---- troubleshoot profile: all sixteen templates, all 32 fixtures ----
             with tempfile.TemporaryDirectory(prefix="sre-selftest-ts.") as ts_tmp:
                 ts_dump_path = os.path.join(ts_tmp, "answers.json")
                 ts_stages, ts_order, ts_final = write_outputs(
@@ -3584,9 +3862,19 @@ def self_test(seeds, verbose=True):
                               encoding="utf-8") as fh:
                         nginx_avc = fh.read()
                     if "selinux-avc" in ts_order:
+                        nginx_selinux_mode = labelled_report(
+                            nginx_selinux_mode, "getenforce (selinux-avc)")
                         check(nginx_selinux_mode == "Enforcing\n"
                               and "avc: denied" in nginx_avc,
                               "seed %d: shared SELinux fixtures must carry the selected AVC denial" % seed)
+                    elif "perm-denied" in ts_order:
+                        nginx_selinux_mode = labelled_report(
+                            nginx_selinux_mode, "getenforce (perm-denied)")
+                        nginx_perm_avc = labelled_report(
+                            nginx_avc, "ausearch -m avc (perm-denied)")
+                        check(nginx_selinux_mode == "Permissive\n"
+                              and nginx_perm_avc == "----\n<no matches>\n",
+                              "seed %d: shared permission fixtures must carry permissive/no-AVC evidence" % seed)
                     else:
                         check(nginx_selinux_mode in ("Permissive\n", "Disabled\n")
                               and nginx_avc != NEUTRAL_FIXTURE,
@@ -3617,6 +3905,156 @@ def self_test(seeds, verbose=True):
                               "seed %d: stale DNS target missing from answers" % seed)
                     check(ans[1] in curl_v and ans[1] in nc and "Connection refused" in nc,
                           "seed %d: DNS transport fragment/refusal missing" % seed)
+                if "blocked-port" in ts_order:
+                    with open(os.path.join(ts_fixtures, "nc_zv.txt"), encoding="utf-8") as fh:
+                        blocked_nc = fh.read()
+                    with open(os.path.join(ts_fixtures, "ss_tlnp.txt"), encoding="utf-8") as fh:
+                        blocked_ss = fh.read()
+                    with open(os.path.join(ts_fixtures, "curl_v.txt"), encoding="utf-8") as fh:
+                        blocked_curl = fh.read()
+                    with open(os.path.join(ts_fixtures, "ping.txt"), encoding="utf-8") as fh:
+                        blocked_ping = fh.read()
+                    with open(os.path.join(ts_fixtures, "dig.txt"), encoding="utf-8") as fh:
+                        blocked_dig = fh.read()
+                    blocked_checks = ts_dump["stages"]["blocked-port"]["checks"]
+                    blocked_ans = [c["answer"] for c in blocked_checks]
+                    blocked_cfg = os.path.join(ts_fs, blocked_checks[2]["path"].lstrip("/"))
+                    with open(blocked_cfg, encoding="utf-8") as fh:
+                        blocked_broken = fh.read()
+                    host_match = re.search(r"^target_host = (.+)$", blocked_broken, re.MULTILINE)
+                    port_match = re.search(r"^bind_port = (\d+)$", blocked_broken, re.MULTILINE)
+                    allowed_match = re.search(r"^bind_port = (\d+)$", blocked_ans[2], re.MULTILINE)
+                    timeout_match = re.search(r"^connect_timeout_ms = (\d+)$",
+                                              blocked_broken, re.MULTILINE)
+                    target_host = host_match.group(1) if host_match else ""
+                    blocked_port = port_match.group(1) if port_match else ""
+                    allowed_port = allowed_match.group(1) if allowed_match else ""
+                    timeout_ms = timeout_match.group(1) if timeout_match else ""
+                    service_name = re.search(r"^service_name = (.+)$",
+                                             blocked_broken, re.MULTILINE)
+                    service_process = (service_name.group(1) + "-listener"
+                                       if service_name else "")
+                    blocked_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                              % ts_dump["stages"]["blocked-port"]["index"])
+                    with open(os.path.join(blocked_sd, "instruction"), encoding="utf-8") as fh:
+                        blocked_instr = fh.read()
+                    with open(os.path.join(blocked_sd, "hint"), encoding="utf-8") as fh:
+                        blocked_hint = fh.read()
+                    check(re.fullmatch(r"/etc/([^/]+)/\1\.conf", blocked_checks[2]["path"])
+                          is not None and target_host == blocked_ans[0],
+                          "seed %d: blocked-port config/host answer is inconsistent" % seed)
+                    check(bool(blocked_port) and bool(allowed_port)
+                          and blocked_port != allowed_port
+                          and blocked_ans[2] == blocked_broken.replace(
+                              "bind_port = " + blocked_port,
+                              "bind_port = " + allowed_port),
+                          "seed %d: blocked-port repair is not the exact allowed-port change" % seed)
+                    check(target_host in blocked_nc and blocked_port in blocked_nc
+                          and blocked_ans[1] in blocked_nc
+                          and "Connection timed out" in blocked_nc,
+                          "seed %d: blocked-port nc timeout evidence is incomplete" % seed)
+                    check(target_host in blocked_curl and blocked_port in blocked_curl
+                          and blocked_ans[1] in blocked_curl
+                          and "Connection timed out" in blocked_curl
+                          and bool(timeout_ms)
+                          and ("after " + timeout_ms + " milliseconds") in blocked_curl,
+                          "seed %d: blocked-port curl timeout/fragment evidence is inconsistent" % seed)
+                    check(bool(service_process) and service_process in blocked_ss
+                          and (":" + allowed_port) in blocked_ss
+                          and (":" + blocked_port) not in blocked_ss,
+                          "seed %d: blocked-port ss evidence has the wrong listener state" % seed)
+                    check(target_host in blocked_ping and "0% packet loss" in blocked_ping
+                          and target_host in blocked_dig and " IN A " in blocked_dig,
+                          "seed %d: blocked-port host reachability/DNS evidence is incomplete" % seed)
+                    check(all(command in blocked_instr for command in
+                              ("nc -zv", "ss -tlnp", "curl -v", "ping")),
+                          "seed %d: blocked-port instruction omits its command checklist" % seed)
+                    check(blocked_ans[0] not in blocked_instr
+                          and blocked_ans[1] not in blocked_instr
+                          and ("bind_port = " + allowed_port) not in blocked_instr
+                          and blocked_ans[0] not in blocked_hint
+                          and blocked_ans[1] not in blocked_hint
+                          and ("bind_port = " + allowed_port) not in blocked_hint,
+                          "seed %d: blocked-port instruction/hints reveal an answer" % seed)
+
+                if "perm-denied" in ts_order:
+                    with open(os.path.join(ts_fixtures, "systemctl_status.txt"),
+                              encoding="utf-8") as fh:
+                        perm_status = fh.read()
+                    with open(os.path.join(ts_fixtures, "journalctl_unit.txt"),
+                              encoding="utf-8") as fh:
+                        perm_journal = fh.read()
+                    with open(os.path.join(ts_fixtures, "getenforce.txt"),
+                              encoding="utf-8") as fh:
+                        perm_mode_text = fh.read()
+                    with open(os.path.join(ts_fixtures, "ausearch_avc.txt"),
+                              encoding="utf-8") as fh:
+                        perm_avc_text = fh.read()
+                    perm_checks = ts_dump["stages"]["perm-denied"]["checks"]
+                    perm_ans = [c["answer"] for c in perm_checks]
+                    perm_cfg = os.path.join(ts_fs, perm_checks[2]["path"].lstrip("/"))
+                    with open(perm_cfg, encoding="utf-8") as fh:
+                        perm_broken = fh.read()
+                    denied_path, _, perm_fragment = perm_ans[0].partition(":")
+                    denied_match = re.search(r"^data_path = (.+)$", perm_broken, re.MULTILINE)
+                    reference_match = re.search(r"^data_path = (.+)$", perm_ans[2], re.MULTILINE)
+                    configured_path = denied_match.group(1) if denied_match else ""
+                    reference_path = reference_match.group(1) if reference_match else ""
+                    unit = os.path.basename(perm_checks[2]["path"])[:-5] + ".service"
+                    denial_lines = [line for line in perm_journal.splitlines()
+                                    if "Permission denied" in line]
+                    source_lines = [re.search(re.escape(denied_path) + r":(\d+)", line)
+                                    for line in denial_lines]
+                    perm_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                           % ts_dump["stages"]["perm-denied"]["index"])
+                    with open(os.path.join(perm_sd, "instruction"), encoding="utf-8") as fh:
+                        perm_instr = fh.read()
+                    with open(os.path.join(perm_sd, "hint"), encoding="utf-8") as fh:
+                        perm_hint = fh.read()
+                    check(re.fullmatch(r"/etc/([^/]+)/\1\.conf", perm_checks[2]["path"])
+                          is not None and configured_path == denied_path,
+                          "seed %d: perm-denied config/path answer is inconsistent" % seed)
+                    check(bool(reference_path) and reference_path != denied_path
+                          and perm_ans[2] == perm_broken.replace(
+                              "data_path = " + denied_path,
+                              "data_path = " + reference_path),
+                          "seed %d: perm-denied repair is not the exact readable-path change" % seed)
+                    check(len(denial_lines) >= 2 and all(
+                              denied_path in line and perm_fragment in line
+                              for line in denial_lines),
+                          "seed %d: perm-denied journal path/fragment evidence is incomplete" % seed)
+                    denied_file = os.path.join(ts_fs, denied_path.lstrip("/"))
+                    with open(denied_file, encoding="utf-8") as fh:
+                        denied_data = fh.read()
+                    check(all(match is not None and 2 <= int(match.group(1)) <= len(
+                                  denied_data.splitlines()) for match in source_lines),
+                          "seed %d: perm-denied source line is outside the denied file" % seed)
+                    check("Active: failed" in perm_status and unit in perm_status
+                          and perm_fragment in perm_status and unit in perm_journal,
+                          "seed %d: perm-denied unit status/journal evidence is incomplete" % seed)
+                    perm_mode = labelled_report(perm_mode_text, "getenforce (perm-denied)")
+                    perm_avc = labelled_report(perm_avc_text, "ausearch -m avc (perm-denied)")
+                    check(perm_mode == "Permissive\n"
+                          and perm_avc == "----\n<no matches>\n",
+                          "seed %d: perm-denied SELinux/AVC evidence is incomplete" % seed)
+                    reference_file = os.path.join(ts_fs, reference_path.lstrip("/"))
+                    with open(reference_file, encoding="utf-8") as fh:
+                        reference_text = fh.read()
+                    check(perm_ans[1] == "nginx"
+                          and reference_path.startswith("/srv/sre-trainer/references/")
+                          and (os.stat(reference_file).st_mode & 0o777) == 0o644
+                          and "owner" not in reference_text.lower(),
+                          "seed %d: perm-denied reference metadata/content is inconsistent" % seed)
+                    check(all(command in perm_instr for command in
+                              ("systemctl status", "journalctl -u", "ls -l", "stat",
+                               "getenforce", "ausearch -m avc")),
+                          "seed %d: perm-denied instruction omits its command checklist" % seed)
+                    check(denied_path not in perm_instr and perm_fragment not in perm_instr
+                          and perm_ans[1] not in perm_instr
+                          and denied_path not in perm_hint and perm_fragment not in perm_hint
+                          and perm_ans[1] not in perm_hint,
+                          "seed %d: perm-denied instruction/hints reveal an answer" % seed)
+
                 if "selinux-avc" in ts_order:
                     with open(os.path.join(ts_fixtures, "getenforce.txt"),
                               encoding="utf-8") as fh:
@@ -3642,6 +4080,7 @@ def self_test(seeds, verbose=True):
                     with open(os.path.join(selinux_sd, "instruction"), encoding="utf-8") as fh:
                         selinux_instr = fh.read()
                     ref_match = re.search(r"(/etc/[^/\s`]+/references)", selinux_instr)
+                    selinux_mode = labelled_report(selinux_mode, "getenforce (selinux-avc)")
                     check(selinux_mode == "Enforcing\n" and len(denials) >= 2,
                           "seed %d: SELinux enforcement/denial evidence missing" % seed)
                     check(bool(denied_path) and denied_path in avc

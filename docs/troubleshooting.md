@@ -1,6 +1,6 @@
 # Day 2: the troubleshoot profile
 
-The trainer's second profile is a pool of fourteen diagnostic drills whose terminal
+The trainer's second profile is a pool of sixteen diagnostic drills whose terminal
 commands are answered from fixtures instead of a live machine. It exists to
 practise the read-then-repair loop — inspect the evidence, decide on one change,
 make it, prove it — without shipping a privileged container, a systemd host or a
@@ -14,11 +14,12 @@ profile, the interaction is identical; only the stages differ.
 - Profile flag: `PROFILE=troubleshoot`
 - Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`,
   `nginx-config`, `dns-mismatch`, `selinux-avc`, `port-conflict`, `oom-kill`,
-  `image-pull`, `svc-selector`, `resource-limits`, `tls-expiry`, `dependency-down`
+  `image-pull`, `svc-selector`, `resource-limits`, `tls-expiry`, `dependency-down`,
+  `blocked-port`, `perm-denied`
 - Image / container: `sre-terminal-trainer-troubleshoot:local` / `sre-trainer-troubleshoot`
   (separate from the default names, so both profiles can run side by side)
 
-## The fourteen templates
+## The sixteen templates
 
 Each stage's brief names the exact files and check ids. The checklists below are
 the commands the stage is built around; the facts they expose are randomized per
@@ -276,6 +277,44 @@ listening dependency port corroborated by the endpoint clues. The file check
 repairs `/etc/<svc>/<svc>.conf` by changing only `dependency_host` and
 `dependency_port` to the approved endpoint, preserving every other byte.
 
+### `blocked-port`
+
+A service endpoint times out even though its target host is reachable. Separate
+host reachability from TCP service availability before changing the service
+configuration:
+
+| Command | What it is for |
+|---|---|
+| `nc -zv <host> <port>` | Target hostname, configured port, timeout and connection diagnostic token |
+| `curl -v <url>` | Verbose corroboration of the connect timeout and the same diagnostic token |
+| `ss -tlnp` | The service's actual listening port, distinct from the unreachable configured port |
+| `ping <host>` | Host reachability, which does not prove that a TCP port is available |
+| `dig <host> A` | Optional name/address corroboration |
+
+Two hash checks use the target hostname and connection token. The file check
+changes only `bind_port` in `/etc/<svc>/<svc>.conf` to the service's listening
+port revealed by the socket evidence. Every other byte stays unchanged.
+
+### `perm-denied`
+
+A service unit fails while opening its configured data file. Correlate the unit
+and journal evidence with real filesystem metadata, and rule out mandatory
+access control before repairing the path:
+
+| Command | What it is for |
+|---|---|
+| `systemctl status <unit>` | Failed unit, configured path and incident context |
+| `journalctl -u <unit> -n 100 --no-pager` | `Permission denied`, full path, randomized source line and incident fragment |
+| `ls -l <path>` | Real owner/group names and mode bits for the denied and reference files |
+| `stat <path>` | Numeric ownership and permission metadata |
+| `getenforce` | Permissive SELinux mode for this scenario |
+| `ausearch -m avc` | No matching AVC records, ruling out an SELinux denial |
+
+Two hash checks use the denied path plus incident fragment and the reference
+file's owner name. The file check changes only `data_path` in
+`/etc/<svc>/<svc>.conf` to the readable reference file. The reference's ownership
+is real image metadata, not text in its contents.
+
 ## How the mocks work
 
 Orchestration detail, not something a trainee needs to act on.
@@ -296,10 +335,9 @@ Orchestration detail, not something a trainee needs to act on.
   missing final newline are preserved. When selected stages share evidence,
   the generator composes it in a canonical order: socket, Kubernetes and
   container table rows are combined, inspection arrays retain every object,
-  and labelled journal, memory, container-log, status, DNS, ping, nc and
-   Kubernetes describe/log reports stay intact. Every selected stage therefore
-   keeps its own clues
-  regardless of `PICK` order.
+  and labelled journal, enforcement/AVC, memory, container-log, status, DNS,
+  ping, nc and Kubernetes describe/log reports stay intact. Every selected stage
+  therefore keeps its own clues regardless of `PICK` order.
 - **Selection is a small explicit parser, not a shell.** `journalctl -u UNIT -n
   100 --no-pager` accepts those three flags in any order; `journalctl -xe` is
   its own form. `kubectl` distinguishes `get pods`, `get svc [NAME]`,
@@ -325,7 +363,7 @@ Orchestration detail, not something a trainee needs to act on.
 ## Running it
 
 ```sh
-make up PROFILE=troubleshoot                         # seeded selection of all fourteen
+make up PROFILE=troubleshoot                         # seeded selection of all sixteen
 # Or choose an exact, ordered subset:
 make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
@@ -334,9 +372,9 @@ make ssh
 - `PICK` names any non-empty subset and its exact order for this build
   (`--pick` in the generator). With `PICK` set, `SET` does not decide the count;
   the picked list does.
-- With no `PICK`, this profile defaults to `SET=14`, selecting all fourteen
-  templates in seeded order. `SET=1` through `13` selects that many from the
-  pool; values outside 1–14 are rejected before the build. The terminal profile
+- With no `PICK`, this profile defaults to `SET=16`, selecting all sixteen
+  templates in seeded order. `SET=1` through `15` selects that many from the
+  pool; values outside 1–16 are rejected before the build. The terminal profile
   keeps its default `SET=8`.
 - `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
   corpus; the generator layer is keyed on the build arguments, so an unchanged
@@ -418,7 +456,7 @@ A stage is solved when `verify stage` prints its flag — not when the service
 - **Throwaway container.** Your edits live inside the container. `make down`
   removes it, so unrecorded work is gone; the completion record is the only
   thing that persists.
-- **Fixed pool.** There are fourteen templates. Fixtures for commands the picked
+- **Fixed pool.** There are sixteen templates. Fixtures for commands the picked
   stages do not use are still shipped, but they print a neutral placeholder
   instead of scenario data.
 

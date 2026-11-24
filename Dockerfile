@@ -66,7 +66,7 @@ FROM alpine:${ALPINE_VERSION} AS troubleshoot
 
 # Keep the terminal toolbox identical; the mocks shadow selected real tools.
 # The nginx service account owns generated reference assets so `ls -l` exposes
-# real service-user metadata to the nginx-config drill.
+# real service-user metadata to the nginx-config and perm-denied drills.
 RUN apk add --no-cache \
         openssh bash tmux nano grep tree less coreutils diffutils gawk findutils shadow \
     && addgroup -S nginx \
@@ -111,6 +111,9 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/sremock \
  && if [ -d /etc/nginx/references ]; then \
          find /etc/nginx/references -type f -exec chown nginx:nginx {} +; \
      fi \
+ && if [ -d /srv/sre-trainer/references ]; then \
+         find /srv/sre-trainer/references -type f -exec chown nginx:nginx {} +; \
+      fi \
  && chown -R 1000:1000 /home/trainee \
  && ssh-keygen -A
 
