@@ -998,7 +998,7 @@ def t_svc_crashloop(rng, fs, fixtures):
                    "(service first), as found in systemctl status and journalctl -u."),
         file_check("svc-crashloop-2", cfg, fixed, "port-%d" % free_port,
                    "Repair %s in place: change only bind_port to the reserved free port and "
-                   "db_host to the endpoint named in the journal." % cfg,
+                   "db_host to the post-failover endpoint named in the journal." % cfg,
                    initial=broken),
         hash_check("svc-crashloop-3", holder,
                    "Submit the process name shown holding the configured port in ss -tlnp."),
@@ -1007,11 +1007,11 @@ def t_svc_crashloop(rng, fs, fixtures):
         "The service %s is crash-looping. Its configuration is %s and its unit is %s. "
         "Use `systemctl status %s`, `journalctl -u %s -n 100 --no-pager` and "
         "`journalctl -xe` to find the service name, the repeated error code, the reserved "
-        "replacement port and the database endpoint after failover. Use `ss -tlnp` to "
+        "replacement port and the post-failover endpoint. Use `ss -tlnp` to "
         "identify the process that already holds the configured port.\n\n"
         "The checked config is %s. Its corrected end state is byte-for-byte the shipped "
         "file with exactly two changes: `bind_port` becomes the reserved free port named "
-        "in the journal, and `db_host` becomes the new endpoint named in the journal. "
+        "in the journal, and `db_host` becomes the post-failover endpoint named in the journal. "
         "Leave every other line unchanged and edit the file in place."
         % (unit, cfg, unit_path, unit, unit, cfg)
     )
@@ -1020,7 +1020,7 @@ def t_svc_crashloop(rng, fs, fixtures):
         "--no-pager and journalctl -xe for the repeated crash signature.",
         "Checklist: ss -tlnp lists listening ports and their owning processes; a port "
         "that is not in LISTEN is free. The journal records which port was reserved.",
-        "Checklist: read the journal for the post-failover database endpoint, then edit "
+        "Checklist: read the journal for the post-failover endpoint, then edit "
         "only the bind_port and db_host lines of the config in place with nano. Report "
         "the process name exactly as printed by ss -tlnp.",
     ]
