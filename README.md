@@ -71,7 +71,7 @@ The briefs, hints, checks, flags, `verify` commands, timing records and `make do
 | `make down` | Copy completion records to `state/`, then stop and remove the container. |
 | `make new` | `down`, then `up` with a fresh seed. |
 | `make best` | Local records, fastest first. |
-| `make test` | One up/down cycle, then assert the working tree is clean. |
+| `make test` | Run both terminal and troubleshoot smoke suites, then one up/down cycle; assert the working tree is clean. |
 | `make clean` | Remove the container, image, `.instance/` and `state/`. |
 
 Variables: `ENGINE`, `IMAGE`, `CONTAINER`, `PORT`, `SET` (stages per run; default 8 for terminal and 16 for troubleshoot), `SEED`, `SSH_USER`, `INSTANCE` (credentials dir, default `.instance`) and `STATE` (records dir, default `state/`). Every target honours `ENGINE`, including the recursive `make` calls in `new` and `test`. The demo recorder uses `INSTANCE`/`STATE` to keep its own throwaway files.
