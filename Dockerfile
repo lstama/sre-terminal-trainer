@@ -24,6 +24,10 @@ FROM alpine:${ALPINE_VERSION} AS builder
 # generator (and therefore rebuilds the runtime layer that copies its output).
 ARG SEED=1
 ARG SET=8
+# Empty values (including a plain `docker build` with no build args) mean the
+# original terminal profile with no --pick override.
+ARG PROFILE=terminal
+ARG PICK=
 
 RUN apk add --no-cache python3 gcc musl-dev
 
@@ -39,11 +43,17 @@ COPY src/ ./src/
 #   /generated/fixtures/      flat trainee-readable troubleshoot fixtures
 # answers.json is test-only plaintext and is deleted before this stage ends,
 # so no answer ever reaches the runtime image.
-RUN python3 generator/generate.py \
+RUN extra=""; \
+    if [ -n "${PROFILE}" ] && [ "${PROFILE}" != terminal ]; then \
+      extra="--profile ${PROFILE}"; \
+      if [ -n "${PICK}" ]; then extra="${extra} --pick ${PICK}"; fi; \
+    fi; \
+    python3 generator/generate.py \
         --seed "${SEED}" \
         --set "${SET}" \
         --out /generated \
         --dump-answers /generated/answers.json \
+        ${extra} \
  && gcc -O2 -static -o /generated/verify src/sha256.c src/util.c src/verify.c \
  && gcc -O2 -static -o /generated/sremock src/sremock.c \
  && rm -f /generated/answers.json
