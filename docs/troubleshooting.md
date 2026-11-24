@@ -1,6 +1,6 @@
 # Day 2: the troubleshoot profile
 
-The trainer's second profile is a pool of six diagnostic drills whose terminal
+The trainer's second profile is a pool of eight diagnostic drills whose terminal
 commands are answered from fixtures instead of a live machine. It exists to
 practise the read-then-repair loop — inspect the evidence, decide on one change,
 make it, prove it — without shipping a privileged container, a systemd host or a
@@ -13,11 +13,11 @@ profile, the interaction is identical; only the stages differ.
 
 - Profile flag: `PROFILE=troubleshoot`
 - Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`,
-  `nginx-config`, `dns-mismatch`
+  `nginx-config`, `dns-mismatch`, `selinux-avc`, `port-conflict`
 - Image / container: `sre-terminal-trainer-troubleshoot:local` / `sre-trainer-troubleshoot`
   (separate from the default names, so both profiles can run side by side)
 
-## The six templates
+## The eight templates
 
 Each stage's brief names the exact files and check ids. The checklists below are
 the commands the stage is built around; the facts they expose are randomized per
@@ -131,6 +131,40 @@ Two hash checks use the canonical service hostname and the connection token. The
 file check changes only the hostname in `/home/trainee/app/endpoint.conf`; the
 scheme, port, path and every other line must stay byte-for-byte unchanged.
 
+### `selinux-avc`
+
+A service is blocked by mandatory access control. Confirm the enforcement mode,
+then correlate the access-vector-control records with the shipped application
+configuration and its reference directory:
+
+| Command | What it is for |
+|---|---|
+| `getenforce` | Whether SELinux is enforcing policy |
+| `ausearch -m avc` | Repeated denial records: process token, path and wrong context, plus the allowed-source clue |
+| `ls -l <reference-dir>` | Real file ownership and the label-named canonical reference |
+| `cat <reference-file>` | The canonical context and allowed path |
+
+Two hash checks use the denial token and canonical SELinux context. The file
+check changes only the denied `source_path` in `/etc/<svc>/<svc>.conf` to the
+allowed path. The reference's owner is real image metadata; its label is carried
+in the reference filename and contents, not by a live SELinux filesystem.
+
+### `port-conflict`
+
+A service cannot bind because another process already owns its configured port.
+Correlate socket, process and local-connection evidence before editing:
+
+| Command | What it is for |
+|---|---|
+| `ss -tlnp` | Listening addresses, ports and owning processes |
+| `ps aux \| grep <candidate>` | The holder's PID and command |
+| `ps aux` | The full process table, including the port planner's proposed free port |
+| `curl -v localhost:<port>` | The local connection failure and diagnostic token |
+
+Two hash checks use the holder's process name and conflicting port. The file
+check changes only `bind_port` in `/etc/<svc>/<svc>.conf` to the proposed free
+port, preserving every other byte.
+
 ## How the mocks work
 
 Orchestration detail, not something a trainee needs to act on.
@@ -148,7 +182,9 @@ Orchestration detail, not something a trainee needs to act on.
   builder copies them to `/var/lib/sremock/current/` (root-owned, directories
   0755, files 0644 so the trainee can read them). `sremock` copies the selected
   file's bytes to stdout unchanged — no prefix, no added newline, CRLF and a
-  missing final newline are preserved.
+  missing final newline are preserved. When selected stages share `ss_tlnp.txt`
+  or `curl_v.txt`, the generator composes their socket rows or labelled curl
+  transcripts in a canonical order so every stage keeps its own evidence.
 - **Selection is a small explicit parser, not a shell.** `journalctl -u UNIT -n
   100 --no-pager` accepts those three flags in any order; `journalctl -xe` is
   its own form. `kubectl` distinguishes `get pods`, `get events`, `get
@@ -173,7 +209,7 @@ Orchestration detail, not something a trainee needs to act on.
 ## Running it
 
 ```sh
-make up PROFILE=troubleshoot                         # seeded selection of all six
+make up PROFILE=troubleshoot                         # seeded selection of all eight
 # Or choose an exact, ordered subset:
 make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
@@ -182,9 +218,9 @@ make ssh
 - `PICK` names any non-empty subset and its exact order for this build
   (`--pick` in the generator). With `PICK` set, `SET` does not decide the count;
   the picked list does.
-- With no `PICK`, this profile defaults to `SET=6`, selecting all six templates
-  in seeded order. `SET=1` through `5` selects that many from the pool; values
-  outside 1–6 are rejected before the build. The terminal profile keeps its
+- With no `PICK`, this profile defaults to `SET=8`, selecting all eight templates
+  in seeded order. `SET=1` through `7` selects that many from the pool; values
+  outside 1–8 are rejected before the build. The terminal profile keeps its
   default `SET=8`.
 - `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
   corpus; the generator layer is keyed on the build arguments, so an unchanged
@@ -253,8 +289,10 @@ A stage is solved when `verify stage` prints its flag — not when the service
   implemented. Anything else — `systemctl restart`, `kubectl apply`,
   `docker run`, `ss -tulpn` — fails on purpose. A mock that guesses would teach
   the wrong reflex.
-- **No real systemd, kubelet, API server, web server or container runtime.** The
-  image does not install them; `nginx`, `docker` and `podman` are mocks too.
+- **No real systemd, kubelet, API server, web server, SELinux enforcement or
+  container runtime.** The image does not install them; `nginx`, `docker` and
+  `podman` are mocks too. The SELinux drill teaches fixture interpretation, not
+  live policy changes.
 - **No network.** The drills need none, and the image is built without it at run
   time.
 - **Repairs are verified by hash, not by behaviour.** You cannot "fix" the
@@ -264,7 +302,7 @@ A stage is solved when `verify stage` prints its flag — not when the service
 - **Throwaway container.** Your edits live inside the container. `make down`
   removes it, so unrecorded work is gone; the completion record is the only
   thing that persists.
-- **Fixed pool.** There are six templates. Fixtures for commands the picked
+- **Fixed pool.** There are eight templates. Fixtures for commands the picked
   stages do not use are still shipped, but they print a neutral placeholder
   instead of scenario data.
 
@@ -280,9 +318,10 @@ The pool is designed so a new scenario is additive:
    generator refuse a check that already ships solved.
 2. **Fixtures** — emit evidence with `put_fixture(fixtures, name, content,
    tid)`. Every name in `FIXTURE_NAMES` is written for every build. Conflicting
-   hard claims fail loudly; a template that can yield a shared fixture uses
-   `put_soft`, and a hard claim always wins. Unused names fall back to the
-   neutral placeholder.
+   hard claims fail loudly, except for table/transcript evidence that explicitly
+   uses a tested `put_fixture_merged` combiner. A template that can yield a shared
+   fixture uses `put_soft`, and a hard claim always wins. Unused names fall back
+   to the neutral placeholder.
 3. **New command or new argument form** — add the dispatch arm in
    `src/sremock.c` (fixture names stay compile-time constants), add the symlink
    in the `troubleshoot` stage of the `Dockerfile` for a brand-new command

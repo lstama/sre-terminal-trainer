@@ -85,10 +85,12 @@ egress); the drills are all local files.
   Podman maps container-root into the user namespace, where setuid still works).
 - **Host credentials are generated per instance** by `up` (mode 0600, never committed).
 - **Day 2 is the `troubleshoot` profile.** A second profile (`PROFILE=troubleshoot`)
-  reuses the same harness for six diagnostic templates (`svc-crashloop`,
-  `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`).
-  Their service commands are mocked; `ls -l` reads real ownership metadata on the
-  nginx reference asset. Details: `docs/troubleshooting.md`.
+  reuses the same harness for eight diagnostic templates (`svc-crashloop`,
+  `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`,
+  `selinux-avc`, `port-conflict`). Their service commands are mocked; `ls -l` reads
+  real ownership metadata on reference assets. Shared socket/curl fixtures compose
+  evidence when multiple selected stages need them. Details:
+  `docs/troubleshooting.md`.
 
 ## Task split
 
@@ -101,6 +103,7 @@ egress); the drills are all local files.
 | T05 | Fix review findings, dynamic end-to-end verification, walkthrough | done |
 | T06 | Read-only static recheck of the fixed harness | done |
 | T07 | Docker/Podman engine abstraction, Podman install, both-engine verification | done |
+| T30 | Add `selinux-avc` and `port-conflict`; expand troubleshoot pool to eight | done |
 
 ## Open questions
 

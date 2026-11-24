@@ -22,10 +22,10 @@ included), with a real 8/8 solve under Podman.
 - T07: Docker/Podman engine abstraction in the `Makefile` (`ENGINE`, auto-detected), docs
   updated, Podman 6.2.0 installed rootless, and both engines verified live.
   Details: `.agent/reports/T07-podman.md`.
-- Day 2: the `troubleshoot` profile has six templates (`svc-crashloop`,
-  `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`).
-  Diagnostic commands are mocked; nginx reference ownership is real image metadata.
-  Details: `docs/troubleshooting.md`.
+- Day 2: the `troubleshoot` profile has eight templates (`svc-crashloop`,
+  `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`,
+  `selinux-avc`, `port-conflict`). Diagnostic commands are mocked; reference
+  ownership is real image metadata. Details: `docs/troubleshooting.md`.
 - T26 (`feat/troubleshoot-wave3`): added `nginx-config` and `dns-mismatch`, expanded
   the default troubleshoot pool to six, and extended docs/smoke/self-test coverage.
   Docker verification includes a full two-stage SSH solve with both file repairs;
@@ -34,6 +34,12 @@ included), with a real 8/8 solve under Podman.
   fixture and made `PICK` override troubleshoot `SET` range validation. Verified
   `PICK=nginx-config,dns-mismatch SET=8` with a full two-stage Docker SSH solve and
   record save; no-PICK `SET=7` is still rejected before side effects.
+- T30 (`feat/troubleshoot-wave4`): added `selinux-avc` and `port-conflict`, expanded
+  the default troubleshoot pool/SET to eight, and added deterministic composition
+  for shared socket/curl fixtures. Host generator, smoke and determinism checks
+  pass. Docker SSH verification solved both stages with both repairs and saved one
+  record. `make test` passes 111 verifier and 547 troubleshoot assertions; a default
+  Docker troubleshoot boot also reports eight stages and 30 fixtures.
 
 ## Fixes landed in T05
 

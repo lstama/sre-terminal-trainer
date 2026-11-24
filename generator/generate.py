@@ -850,7 +850,7 @@ NEUTRAL_FIXTURE = "no data for this scenario\n"
 # template; every run still emits all 30 fixtures above (unused = NEUTRAL).
 TROUBLESHOOT_IDS = [
     "svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
-    "nginx-config", "dns-mismatch",
+    "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict",
 ]
 TROUBLESHOOT_TEMPLATES = {}
 
@@ -873,6 +873,56 @@ def put_fixture(fixtures, name, content, tid):
     if name in fixtures and fixtures[name] != content:
         raise ValueError("%s: conflicting content for fixture %s" % (tid, name))
     fixtures[name] = content
+
+
+def merge_ss_fixtures(left, right):
+    """Compose listening-socket rows without dropping either stage's evidence.
+
+    The flat fixture namespace is shared by every selected stage.  svc-crashloop
+    and port-conflict both need real ``ss -tlnp`` rows, so keep one header and a
+    canonical, de-duplicated set of rows.  Sorting makes the result independent
+    of PICK order as well as deterministic for a seed.
+    """
+    headers = []
+    rows = set()
+    for text in (left, right):
+        for line in text.splitlines():
+            if line.startswith("State "):
+                if line not in headers:
+                    headers.append(line)
+            elif line.strip():
+                rows.add(line)
+    return "\n".join(headers + sorted(rows)) + "\n"
+
+
+def merge_curl_fixtures(left, right):
+    """Compose labelled curl transcripts while preserving every diagnostic."""
+    blocks = set()
+    for text in (left, right):
+        for block in text.strip().split("\n\n"):
+            if block.strip():
+                blocks.add(block.strip("\n"))
+    return "\n\n".join(sorted(blocks)) + "\n"
+
+
+def put_fixture_merged(fixtures, name, content, tid, merge):
+    """Hard-claim a fixture, composing it when another stage already claimed it.
+
+    Ordinary fixtures retain put_fixture's conflict-is-a-bug behaviour.  Only
+    table/transcript fixtures with an explicit, tested merge use this helper.
+    """
+    if name not in FIXTURE_NAMES:
+        raise ValueError("%s: unknown fixture %r" % (tid, name))
+    if name not in fixtures:
+        fixtures[name] = content
+        return
+    previous = fixtures[name]
+    if previous == content:
+        return
+    merged = merge(previous, content)
+    if merged == previous or merged == content:
+        raise ValueError("%s: fixture merge for %s discarded evidence" % (tid, name))
+    fixtures[name] = merged
 
 
 def put_soft(soft, fixtures, name, content, tid):
@@ -992,13 +1042,13 @@ def t_svc_crashloop(rng, fs, fixtures, soft):
         "%s systemd[1]: %s: Failed with result 'exit-code'." % (ts(rng), unit),
         "Hint: journalctl -u %s -n 100 --no-pager shows the full unit history." % unit,
     ]) + "\n", "svc-crashloop")
-    put_fixture(fixtures, "ss_tlnp.txt", "\n".join([
+    put_fixture_merged(fixtures, "ss_tlnp.txt", "\n".join([
         "State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process",
         'LISTEN  0       128     0.0.0.0:%-11d 0.0.0.0:*          users:(("%s",pid=%d,fd=%d))'
         % (held_port, holder, holder_pid, holder_fd),
         'LISTEN  0       128     127.0.0.1:22       0.0.0.0:*          users:(("sshd",pid=411,fd=3))',
         'LISTEN  0       128     0.0.0.0:5355      0.0.0.0:*          users:(("resolved",pid=208,fd=12))',
-    ]) + "\n", "svc-crashloop")
+    ]) + "\n", "svc-crashloop", merge_ss_fixtures)
 
     # Load-bearing invariants: the clues must be discoverable and must not be
     # pre-filled in the broken config, and the conflict must be visible in ss.
@@ -1520,9 +1570,11 @@ def t_nginx_config(rng, fs, fixtures, soft):
     ]) + "\n", "nginx-config")
     # These are deliberately non-load-bearing: a permissive/disabled SELinux
     # state and an empty AVC search provide realistic context, not the cause.
-    put_fixture(fixtures, "getenforce.txt", rng.choice(["Permissive", "Disabled"]) + "\n",
-                "nginx-config")
-    put_fixture(fixtures, "ausearch_avc.txt", "----\n<no matches>\n", "nginx-config")
+    # They are soft claims so selinux-avc owns the same command fixtures when
+    # both stages are selected; nginx-config still gets its benign context alone.
+    put_soft(soft, fixtures, "getenforce.txt",
+             rng.choice(["Permissive", "Disabled"]) + "\n", "nginx-config")
+    put_soft(soft, fixtures, "ausearch_avc.txt", "----\n<no matches>\n", "nginx-config")
 
     # Load-bearing invariants: the reported line is the broken line, the correct
     # virtual-host name is absent from the shipped config, and exactly two lines
@@ -1635,13 +1687,14 @@ def t_dns_mismatch(rng, fs, fixtures, soft):
         "Content-Length: 0",
         "Connection: keep-alive",
     ]) + "\n", "dns-mismatch")
-    put_fixture(fixtures, "curl_v.txt", "\n".join([
+    put_fixture_merged(fixtures, "curl_v.txt", "\n".join([
+        "# curl -v http://%s:%d/v1" % (wrong_host, backend_port),
         "*   Trying %s:%d..." % (wrong_ip, backend_port),
         "* connect to %s (%s) port %d failed: Connection refused"
         % (wrong_host, wrong_ip, backend_port),
         "* connection %s: refused" % connection_fragment,
         "* Closing connection 0",
-    ]) + "\n", "dns-mismatch")
+    ]) + "\n\n", "dns-mismatch", merge_curl_fixtures)
     put_fixture(fixtures, "ping.txt", "\n".join([
         "PING %s (%s) 56(84) bytes of data." % (wrong_host, wrong_ip),
         "64 bytes from %s (%s): icmp_seq=1 ttl=62 time=2.4 ms"
@@ -1707,6 +1760,221 @@ def t_dns_mismatch(rng, fs, fixtures, soft):
         "diagnostic token and corroborate the refused backend port.",
         "Checklist: edit only the endpoint_url hostname in place with nano; keep the "
         "scheme, port, path, timeout and retry lines byte-for-byte unchanged.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("selinux-avc")
+def t_selinux_avc(rng, fs, fixtures, soft):
+    """Mandatory-access-control triage: a denied path has the wrong label."""
+    svc = tok(rng, "svc", 6)
+    cfg = "/etc/%s/%s.conf" % (svc, svc)
+    denied_path = "/srv/%s/blocked/%s.dat" % (svc, tok(rng, "payload", 8))
+    allowed_path = "/srv/%s/allowed/%s.dat" % (svc, tok(rng, "release", 8))
+    fragment = tok(rng, "avc", 6)
+    wrong_context = "system_u:object_r:blocked_%s_t:s0" % hexs(rng, 8)
+    correct_context = "system_u:object_r:release_%s_t:s0" % hexs(rng, 8)
+    source_context = "system_u:system_r:app_t:s0"
+    process_pid = rng.randint(1800, 12000)
+    serial = rng.randint(1000, 99999)
+    reference_dir = "/etc/%s/references" % svc
+    # The label is in the filename, not in the brief: ls -l on the directory
+    # exposes it alongside real root ownership in the runtime image.
+    reference = "%s/%s.conf" % (reference_dir, correct_context)
+
+    broken_lines = [
+        "# %s data source (managed by ops)" % svc,
+        "service_name = %s" % svc,
+        "source_path = %s" % denied_path,
+        "retry_count = 3",
+    ]
+    broken = "\n".join(broken_lines) + "\n"
+    fixed = broken.replace(denied_path, allowed_path)
+    wfile(fs, cfg, broken, mode=0o666)
+    wfile(fs, denied_path, "# blocked payload for %s\n" % svc, mode=0o600)
+    wfile(fs, allowed_path, "# approved payload for %s\n" % svc, mode=0o644)
+    reference_text = "\n".join([
+        "# canonical SELinux reference for %s" % svc,
+        "service_name = %s" % svc,
+        "selinux_context = %s" % correct_context,
+        "allowed_path = %s" % allowed_path,
+        "owner = root",
+    ]) + "\n"
+    wfile(fs, reference, reference_text, mode=0o644)
+
+    put_fixture(fixtures, "getenforce.txt", "Enforcing\n", "selinux-avc")
+    denial_lines = []
+    for attempt in range(rng.randint(2, 4)):
+        denial_lines.append(
+            'type=AVC msg=audit(1795500000.%03d:%d): avc: denied { read open } '
+            'for pid=%d comm="%s" name="%s" path="%s" dev="sda2" ino=%d '
+            'scontext=%s tcontext=%s tclass=file permissive=0'
+            % (rng.randint(1, 999), serial + attempt, process_pid + attempt,
+               fragment, os.path.basename(denied_path), denied_path,
+               rng.randint(10000, 999999), source_context, wrong_context)
+        )
+    ausearch = "\n".join(denial_lines + [
+        'type=SYSCALL msg=audit(1795500000.001:%d): syscall=openat success=no '
+        'exe="/usr/local/bin/%s" subj=%s' % (serial, fragment, source_context),
+        'type=AVC msg=audit(1795500001.001:%d): avc: granted { read open } '
+        'for pid=%d comm="%s" path="%s" dev="sda2" ino=%d '
+        'scontext=%s tcontext=%s tclass=file permissive=0'
+        % (serial + 10, process_pid, fragment, allowed_path,
+           rng.randint(10000, 999999), source_context, correct_context),
+    ]) + "\n"
+    put_fixture(fixtures, "ausearch_avc.txt", ausearch, "selinux-avc")
+
+    if denied_path == allowed_path or wrong_context == correct_context:
+        raise AssertionError("selinux-avc: denied/allowed evidence is not distinct")
+    if denied_path not in broken or allowed_path in broken:
+        raise AssertionError("selinux-avc: broken config does not point only at the denied path")
+    if fixed != broken.replace(denied_path, allowed_path) or fixed == broken:
+        raise AssertionError("selinux-avc: repair is not a path-only change")
+    if fixtures["getenforce.txt"] != "Enforcing\n":
+        raise AssertionError("selinux-avc: SELinux is not enforcing")
+    if sum('avc: denied { read open }' in line for line in denial_lines) != len(denial_lines):
+        raise AssertionError("selinux-avc: denial lines missing")
+    if any(fragment not in line or denied_path not in line for line in denial_lines):
+        raise AssertionError("selinux-avc: denial path/fragment missing")
+    if wrong_context not in ausearch or correct_context not in ausearch:
+        raise AssertionError("selinux-avc: wrong/canonical contexts missing from AVC evidence")
+    if allowed_path not in ausearch or correct_context not in os.path.basename(reference):
+        raise AssertionError("selinux-avc: reference lacks canonical label")
+    if correct_context not in reference_text or allowed_path not in reference_text:
+        raise AssertionError("selinux-avc: reference content lacks allowed-source clue")
+
+    checks = [
+        hash_check("selinux-avc-1", fragment,
+                   "Submit the process comm token repeated on the AVC denial lines "
+                   "from `ausearch -m avc`."),
+        hash_check("selinux-avc-2", correct_context,
+                   "Submit the full canonical SELinux context for the allowed reference, "
+                   "as named by the AVC clue and reference label."),
+        file_check("selinux-avc-3", cfg, fixed, "selinux-" + svc,
+                   "Repair %s in place: replace only `source_path` with the allowed path "
+                   "named by the granted AVC/reference evidence." % cfg,
+                   initial=broken),
+    ]
+    instr = (
+        "A service is being denied access by mandatory access control. Start with "
+        "`getenforce` and `ausearch -m avc`: correlate the repeated denial's process "
+        "token, denied path and wrong context with the broken config at %s. A reference "
+        "directory at %s holds the canonical label and allowed-source mapping; use "
+        "`ls -l` on that directory to inspect its real owner and label-named reference "
+        "file, then read the reference with `cat`.\n\n"
+        "The checked config is %s. Its corrected end state is byte-for-byte the shipped "
+        "file with exactly one change: `source_path` becomes the allowed path named by "
+        "the granted AVC/reference evidence. Leave the service name, retry setting, "
+        "comment and every other byte unchanged."
+        % (cfg, reference_dir, cfg)
+    )
+    hints = [
+        "Checklist: getenforce establishes whether SELinux can deny access; ausearch "
+        "-m avc prints the AVC records, including the repeated comm token and path.",
+        "Checklist: read the full tcontext fields, not just the path. The granted AVC "
+        "and the label-named file listed by ls -l identify the canonical context.",
+        "Checklist: compare the denied source_path with the reference's allowed path; "
+        "edit only that line in place with nano, then Ctrl+O writes and Ctrl+X exits.",
+    ]
+    return instr, hints, checks
+
+
+@troubleshoot_template("port-conflict")
+def t_port_conflict(rng, fs, fixtures, soft):
+    """Socket triage: another process owns the service's configured port."""
+    svc = tok(rng, "portsvc", 6)
+    cfg = "/etc/%s/%s.conf" % (svc, svc)
+    held_port = rng.randint(40000, 49000)
+    free_port = rng.randint(51000, 59999)
+    holder = tok(rng, "listener", 8)
+    holder_pid = rng.randint(1500, 32000)
+    planner_pid = rng.randint(32001, 60000)
+    holder_fd = rng.randint(8, 40)
+    connection_fragment = tok(rng, "conn", 8)
+
+    broken_lines = [
+        "# %s service configuration (managed by ops)" % svc,
+        "service_name = %s" % svc,
+        "bind_host = 0.0.0.0",
+        "bind_port = %d" % held_port,
+        "log_level = warn",
+    ]
+    broken = "\n".join(broken_lines) + "\n"
+    fixed_lines = list(broken_lines)
+    fixed_lines[3] = "bind_port = %d" % free_port
+    fixed = "\n".join(fixed_lines) + "\n"
+    wfile(fs, cfg, broken, mode=0o666)
+
+    put_fixture(fixtures, "ps_aux.txt", "\n".join([
+        "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND",
+        "root    %5d  0.0  0.1   1000   100 ?        S    10:00   0:00 "
+        "%s --bind 127.0.0.2 --port %d" % (holder_pid, holder, held_port),
+        "root    %5d  0.0  0.1   1000   100 ?        S    10:00   0:00 "
+        "port-planner --service %s --free-port %d" % (planner_pid, svc, free_port),
+        "root       411  0.0  0.1   1000   100 ?        S    10:00   0:00 sshd",
+    ]) + "\n", "port-conflict")
+    put_fixture_merged(fixtures, "ss_tlnp.txt", "\n".join([
+        "State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process",
+        'LISTEN  0       128     127.0.0.2:%-11d 0.0.0.0:*          users:(("%s",pid=%d,fd=%d))'
+        % (held_port, holder, holder_pid, holder_fd),
+    ]) + "\n", "port-conflict", merge_ss_fixtures)
+    put_fixture_merged(fixtures, "curl_v.txt", "\n".join([
+        "# curl -v http://localhost:%d/" % held_port,
+        "*   Trying 127.0.0.1:%d..." % held_port,
+        "* connect to 127.0.0.1 port %d failed: Connection refused" % held_port,
+        "* connection %s: refused" % connection_fragment,
+        "* Closing connection 0",
+    ]) + "\n\n", "port-conflict", merge_curl_fixtures)
+
+    if held_port == free_port or fixed == broken:
+        raise AssertionError("port-conflict: conflicting/free ports are not distinct")
+    if fixed != broken.replace("bind_port = %d" % held_port,
+                               "bind_port = %d" % free_port):
+        raise AssertionError("port-conflict: repair is not a bind_port-only change")
+    ps_text = fixtures["ps_aux.txt"]
+    ss_text = fixtures["ss_tlnp.txt"]
+    curl_text = fixtures["curl_v.txt"]
+    if holder not in ps_text or str(holder_pid) not in ps_text:
+        raise AssertionError("port-conflict: holder process/PID missing from ps")
+    if holder not in ss_text or str(held_port) not in ss_text:
+        raise AssertionError("port-conflict: holder/port missing from ss")
+    if str(free_port) not in ps_text or str(free_port) in ss_text:
+        raise AssertionError("port-conflict: proposed free port is not corroborated")
+    if "localhost:%d" % held_port not in curl_text \
+            or "Connection refused" not in curl_text \
+            or connection_fragment not in curl_text:
+        raise AssertionError("port-conflict: localhost curl failure evidence missing")
+
+    checks = [
+        hash_check("port-conflict-1", holder,
+                   "Submit the listener process name from the matching `ps aux | grep` "
+                   "row, not its PID."),
+        hash_check("port-conflict-2", str(held_port),
+                   "Submit the numeric port held by that process in `ss -tlnp`.",
+                   plain=str(held_port)),
+        file_check("port-conflict-3", cfg, fixed, "port-" + svc,
+                   "Repair %s in place: change only `bind_port` to the service's proposed "
+                   "free port from the process-table evidence." % cfg,
+                   initial=broken),
+    ]
+    instr = (
+        "A service cannot bind its configured port. Use `ss -tlnp` to identify the "
+        "listening address, port and process, then `ps aux | grep <candidate>` to "
+        "corroborate the holder's PID and command. Inspect the full `ps aux` table "
+        "for the port planner's proposed free port, and use "
+        "`curl -v localhost:<port>` to check the local endpoint.\n\n"
+        "The checked config is %s. Its corrected end state is byte-for-byte the shipped "
+        "file with exactly one change: `bind_port` becomes the proposed free port. "
+        "Leave `bind_host`, the service name, log level, comment and every other byte "
+        "unchanged, and edit the file in place." % cfg
+    )
+    hints = [
+        "Checklist: ss -tlnp lists LISTEN sockets and process owners; correlate the "
+        "configured port with the holder, then ps aux | grep <candidate> confirms it.",
+        "Checklist: curl -v localhost:<port> shows the local connection result and a "
+        "diagnostic token; it corroborates the endpoint but does not choose the repair.",
+        "Checklist: the port-planner row in ps aux names a proposed free port for the "
+        "service; confirm it is absent from ss, then change only bind_port with nano.",
     ]
     return instr, hints, checks
 
@@ -1855,7 +2123,7 @@ def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
 # ---------------------------------------------------------------------------
 
 def self_test(seeds, verbose=True):
-    """Generate a full 16-stage terminal set *and* the 6-stage troubleshoot set
+    """Generate a full 16-stage terminal set *and* the 8-stage troubleshoot set
     per seed, then cross-foot every answer against the artefacts on disk.
 
     The templates assert their own load-bearing invariants while generating (e.g.
@@ -1863,8 +2131,8 @@ def self_test(seeds, verbose=True):
     adds the independent, generator-wide checks: flag formula vs ``checks.tsv``
     order, file checks not shipped pre-solved, no answer dump under ``fs/``, the
     two drill-specific claims (top talker, config-drift baseline token), and for
-    troubleshoot: the full 30-fixture contract, broken initial files, and the
-    scenario-specific clue placement for the four added troubleshoot drills.
+    troubleshoot: the full 30-fixture contract, broken initial files, and
+    scenario-specific clue placement, including both wave-four drills.
     """
     import re
     import tempfile
@@ -1987,7 +2255,7 @@ def self_test(seeds, verbose=True):
                 check("answers.json" not in filenames,
                       "seed %d: answers.json leaked into %s" % (seed, dirpath))
 
-            # ---- troubleshoot profile: all six templates, all 30 fixtures ----
+            # ---- troubleshoot profile: all eight templates, all 30 fixtures ----
             with tempfile.TemporaryDirectory(prefix="sre-selftest-ts.") as ts_tmp:
                 ts_dump_path = os.path.join(ts_tmp, "answers.json")
                 ts_stages, ts_order, ts_final = write_outputs(
@@ -2130,6 +2398,20 @@ def self_test(seeds, verbose=True):
                               "seed %d: nginx reference lacks corrected server_name" % seed)
                     check(ans[1] == "nginx",
                           "seed %d: nginx owner answer is not the service user" % seed)
+                    with open(os.path.join(ts_fixtures, "getenforce.txt"),
+                              encoding="utf-8") as fh:
+                        nginx_selinux_mode = fh.read()
+                    with open(os.path.join(ts_fixtures, "ausearch_avc.txt"),
+                              encoding="utf-8") as fh:
+                        nginx_avc = fh.read()
+                    if "selinux-avc" in ts_order:
+                        check(nginx_selinux_mode == "Enforcing\n"
+                              and "avc: denied" in nginx_avc,
+                              "seed %d: shared SELinux fixtures must carry the selected AVC denial" % seed)
+                    else:
+                        check(nginx_selinux_mode in ("Permissive\n", "Disabled\n")
+                              and nginx_avc != NEUTRAL_FIXTURE,
+                              "seed %d: nginx-only SELinux context must be benign" % seed)
                 if "dns-mismatch" in ts_order:
                     with open(os.path.join(ts_fixtures, "dig.txt"), encoding="utf-8") as fh:
                         dig = fh.read()
@@ -2156,6 +2438,104 @@ def self_test(seeds, verbose=True):
                               "seed %d: stale DNS target missing from answers" % seed)
                     check(ans[1] in curl_v and ans[1] in nc and "Connection refused" in nc,
                           "seed %d: DNS transport fragment/refusal missing" % seed)
+                if "selinux-avc" in ts_order:
+                    with open(os.path.join(ts_fixtures, "getenforce.txt"),
+                              encoding="utf-8") as fh:
+                        selinux_mode = fh.read()
+                    with open(os.path.join(ts_fixtures, "ausearch_avc.txt"),
+                              encoding="utf-8") as fh:
+                        avc = fh.read()
+                    selinux_checks = ts_dump["stages"]["selinux-avc"]["checks"]
+                    selinux_ans = [c["answer"] for c in selinux_checks]
+                    selinux_cfg = os.path.join(ts_fs, selinux_checks[2]["path"].lstrip("/"))
+                    with open(selinux_cfg, encoding="utf-8") as fh:
+                        selinux_broken = fh.read()
+                    source_match = re.search(r"source_path = ([^\n]+)", selinux_broken)
+                    denied_path = source_match.group(1) if source_match else ""
+                    denials = [line for line in avc.splitlines() if "avc: denied" in line]
+                    wrong_contexts = re.findall(r"tcontext=([^\s]+)", "\n".join(denials))
+                    grant_line = next((line for line in avc.splitlines()
+                                       if "avc: granted" in line), "")
+                    grant_match = re.search(r'path="([^"]+)"', grant_line)
+                    allowed_path = grant_match.group(1) if grant_match else ""
+                    selinux_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                              % ts_dump["stages"]["selinux-avc"]["index"])
+                    with open(os.path.join(selinux_sd, "instruction"), encoding="utf-8") as fh:
+                        selinux_instr = fh.read()
+                    ref_match = re.search(r"(/etc/[^/\s`]+/references)", selinux_instr)
+                    check(selinux_mode == "Enforcing\n" and len(denials) >= 2,
+                          "seed %d: SELinux enforcement/denial evidence missing" % seed)
+                    check(bool(denied_path) and denied_path in avc
+                          and all(selinux_ans[0] in line and denied_path in line
+                                  for line in denials),
+                          "seed %d: AVC denial token/path not discoverable" % seed)
+                    check(bool(wrong_contexts) and all(c != selinux_ans[1]
+                                                       for c in wrong_contexts)
+                          and selinux_ans[1] in avc,
+                          "seed %d: wrong/canonical SELinux contexts not distinct in AVC" % seed)
+                    check(bool(allowed_path) and allowed_path != denied_path
+                          and selinux_ans[2] == selinux_broken.replace(denied_path, allowed_path),
+                          "seed %d: SELinux repair is not a denied-to-allowed path change" % seed)
+                    check(ref_match is not None,
+                          "seed %d: SELinux instruction lacks reference directory" % seed)
+                    if ref_match:
+                        ref_dir = os.path.join(ts_fs, ref_match.group(1).lstrip("/"))
+                        refs = os.listdir(ref_dir) if os.path.isdir(ref_dir) else []
+                        check(any(name == selinux_ans[1] + ".conf" for name in refs),
+                              "seed %d: real reference filename lacks canonical context" % seed)
+                        matching = [name for name in refs if name == selinux_ans[1] + ".conf"]
+                        if matching:
+                            with open(os.path.join(ref_dir, matching[0]),
+                                      encoding="utf-8") as fh:
+                                reference = fh.read()
+                            check(selinux_ans[1] in reference and "owner = root" in reference,
+                                  "seed %d: SELinux reference lacks context/owner clue" % seed)
+                    check(all(command in selinux_instr for command in
+                              ("getenforce", "ausearch -m avc", "ls -l")),
+                          "seed %d: SELinux instruction omits its command checklist" % seed)
+                    check(selinux_ans[0] not in selinux_instr
+                          and selinux_ans[1] not in selinux_instr,
+                          "seed %d: SELinux instruction reveals a hash answer" % seed)
+                if "port-conflict" in ts_order:
+                    with open(os.path.join(ts_fixtures, "ps_aux.txt"),
+                              encoding="utf-8") as fh:
+                        port_ps = fh.read()
+                    with open(os.path.join(ts_fixtures, "ss_tlnp.txt"),
+                              encoding="utf-8") as fh:
+                        port_ss = fh.read()
+                    with open(os.path.join(ts_fixtures, "curl_v.txt"),
+                              encoding="utf-8") as fh:
+                        port_curl = fh.read()
+                    port_checks = ts_dump["stages"]["port-conflict"]["checks"]
+                    port_ans = [c["answer"] for c in port_checks]
+                    port_cfg = os.path.join(ts_fs, port_checks[2]["path"].lstrip("/"))
+                    with open(port_cfg, encoding="utf-8") as fh:
+                        port_broken = fh.read()
+                    held_match = re.search(r"bind_port = (\d+)", port_broken)
+                    free_match = re.search(r"bind_port = (\d+)", port_ans[2])
+                    held_port = held_match.group(1) if held_match else ""
+                    free_port = free_match.group(1) if free_match else ""
+                    port_sd = os.path.join(ts_tmp, "stages", "%02d"
+                                           % ts_dump["stages"]["port-conflict"]["index"])
+                    with open(os.path.join(port_sd, "instruction"), encoding="utf-8") as fh:
+                        port_instr = fh.read()
+                    check(port_ans[0] in port_ps and port_ans[1] in port_ss
+                          and held_port == port_ans[1],
+                          "seed %d: port holder/port missing from process evidence" % seed)
+                    check(bool(free_port) and free_port != held_port
+                          and free_port in port_ps and free_port not in port_ss
+                          and port_ans[2] == port_broken.replace(
+                              "bind_port = " + held_port, "bind_port = " + free_port),
+                          "seed %d: port repair/free-port evidence inconsistent" % seed)
+                    check("localhost:" + held_port in port_curl
+                          and "Connection refused" in port_curl,
+                          "seed %d: localhost curl failure missing for conflicting port" % seed)
+                    check(all(command in port_instr for command in
+                              ("ps aux | grep", "ss -tlnp", "curl -v localhost:")),
+                          "seed %d: port instruction omits its command checklist" % seed)
+                    check(port_ans[0] not in port_instr and held_port not in port_instr
+                          and (not free_port or free_port not in port_instr),
+                          "seed %d: port instruction reveals a hash/file answer" % seed)
 
                 if verbose:
                     print("selftest seed %d: troubleshoot %d stages + %d fixtures checked"

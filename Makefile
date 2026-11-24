@@ -37,8 +37,8 @@ BUILD_PROFILE_ARGS :=
 endif
 
 PORT      ?= 2222
-# The troubleshoot pool has six templates; keep the terminal default at 8.
-SET       ?= $(if $(filter troubleshoot,$(PROFILE)),6,8)
+# Terminal and troubleshoot both default to all eight templates.
+SET       ?= 8
 SEED      ?=
 SSH_USER  ?= trainee
 
@@ -83,8 +83,8 @@ help:
 up:
 	@if [ '$(PROFILE)' = troubleshoot ] && [ -z '$(PICK)' ]; then
 	  case '$(SET)' in
-	    1|2|3|4|5|6) ;;
-	    *) echo "error: PROFILE=troubleshoot supports SET=1..6 (pool of 6 templates); got $(SET)" >&2; exit 1 ;;
+	    1|2|3|4|5|6|7|8) ;;
+	    *) echo "error: PROFILE=troubleshoot supports SET=1..8 (pool of 8 templates); got $(SET)" >&2; exit 1 ;;
 	  esac
 	fi
 	@mkdir -p $(INSTANCE) $(STATE)

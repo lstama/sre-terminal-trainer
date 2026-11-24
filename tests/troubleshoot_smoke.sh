@@ -8,7 +8,7 @@
 # paths and byte-for-byte passthrough.
 #
 # Part 2 (runs when the generator has --profile support): generate the default
-# six-template pool and ordered PICK subsets, then assert the fixture contract,
+# eight-template pool and ordered PICK subsets, then assert the fixture contract,
 # manifests, checks.tsv shape, stage/final flag recomputation, generated scenario
 # clues and that no file check ships already solved. If the generator has no
 # troubleshoot profile yet, part 2 is reported as pending (a SKIP, not a failure).
@@ -421,7 +421,7 @@ FIXTURES = [
     "kubectl_get_events.txt", "kubectl_get_configmap.txt", "kubectl_get_deploy.txt",
 ]
 POOL = ["svc-crashloop", "k8s-crashloop", "disk-full", "container-crash",
-        "nginx-config", "dns-mismatch"]
+        "nginx-config", "dns-mismatch", "selinux-avc", "port-conflict"]
 NEUTRAL = "no data for this scenario\n"
 PICK = pick_arg.split(",") if pick_arg else None
 expected_count = len(PICK) if PICK else len(POOL)
@@ -453,7 +453,7 @@ if PICK:
 else:
     emit(len(stage_lines) == len(POOL) and len(set(stage_lines)) == len(POOL)
          and set(stage_lines) == set(POOL),
-         "default generation selects each of the six templates exactly once",
+         "default generation selects each of the eight templates exactly once",
          repr(stage_lines))
     emit(dump.get("order") == stage_lines,
          "answers dump order matches the default manifest order", repr(dump.get("order")))
@@ -487,6 +487,9 @@ for index, sid in enumerate(stage_lines, 1):
          "%s: every check has id, type and fragment" % sid)
     with open(os.path.join(sd, "instruction"), encoding="utf-8") as fh:
         instruction = fh.read()
+    with open(os.path.join(sd, "hint"), encoding="utf-8") as fh:
+        hint_text = fh.read()
+    emit(hint_text.strip() != "", "%s: hint file is non-empty" % sid)
     emit(all(c.get("id") in instruction for c in checks),
          "%s: instruction names every check id" % sid)
 
@@ -527,6 +530,23 @@ for index, sid in enumerate(stage_lines, 1):
         emit(sha_text(row["answer"]) == check["sha256"],
              "%s/%s: dump repaired content hashes to the checked sha256"
              % (sid, check["id"]))
+
+    if sid == "svc-crashloop":
+        svc_cfg = dumped[1]["path"]
+        with open(os.path.join(out, "fs", svc_cfg.lstrip("/")),
+                  encoding="utf-8") as fh:
+            svc_initial = fh.read()
+        svc_fixed = dumped[1]["answer"]
+        svc_held = re.search(r"bind_port = (\d+)", svc_initial)
+        svc_free = re.search(r"bind_port = (\d+)", svc_fixed)
+        emit(svc_held is not None and svc_free is not None
+             and dumped[2]["answer"] in fixture("ss_tlnp.txt")
+             and svc_held.group(1) in fixture("ss_tlnp.txt"),
+             "svc-crashloop: composed ss evidence retains its holder and port")
+        emit(svc_free is not None
+             and ("reserved replacement port is " + svc_free.group(1))
+             in fixture("journalctl_unit.txt"),
+             "svc-crashloop: journal retains its reserved free-port clue")
 
     if sid == "disk-full":
         df_text = fixture("df_h.txt")
@@ -606,9 +626,14 @@ for index, sid in enumerate(stage_lines, 1):
                  "nginx-config: reference carries the corrected server_name")
         emit("nginx -t" in instruction and "ls -l" in instruction,
              "nginx-config: instruction teaches nginx -t and ls -l")
-        emit(fixture("getenforce.txt") in ("Permissive\n", "Disabled\n")
-             and fixture("ausearch_avc.txt") != NEUTRAL,
-             "nginx-config: optional SELinux context is present and benign")
+        if "selinux-avc" in stage_lines:
+            emit(fixture("getenforce.txt") == "Enforcing\n"
+                 and "avc: denied" in fixture("ausearch_avc.txt"),
+                 "nginx-config: shared SELinux fixtures preserve the selected AVC denial")
+        else:
+            emit(fixture("getenforce.txt") in ("Permissive\n", "Disabled\n")
+                 and fixture("ausearch_avc.txt") != NEUTRAL,
+                 "nginx-config: optional SELinux context is present and benign")
 
     if sid == "dns-mismatch":
         correct_host = dumped[0]["answer"]
@@ -646,6 +671,103 @@ for index, sid in enumerate(stage_lines, 1):
         emit(all(command in instruction for command in
                  ("dig", "nslookup", "curl -I", "curl -v", "ping", "nc -zv")),
              "dns-mismatch: instruction teaches the DNS and transport checklist")
+
+    if sid == "selinux-avc":
+        fragment = dumped[0]["answer"]
+        context = dumped[1]["answer"]
+        checked_path = dumped[2]["path"]
+        fixed_text = dumped[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        source_match = re.search(r"source_path = ([^\n]+)", initial_text)
+        denied_path = source_match.group(1) if source_match else ""
+        avc = fixture("ausearch_avc.txt")
+        denials = [line for line in avc.splitlines() if "avc: denied" in line]
+        wrong_contexts = re.findall(r"tcontext=([^\s]+)", "\n".join(denials))
+        grant_match = re.search(r'avc: granted .*?path="([^"]+)"', avc)
+        allowed_path = grant_match.group(1) if grant_match else ""
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "selinux-avc: two hash checks precede the file check")
+        emit(re.fullmatch(r"/etc/([^/]+)/\1\.conf", checked_path) is not None,
+             "selinux-avc: checked config follows /etc/<svc>/<svc>.conf")
+        emit(fixture("getenforce.txt") == "Enforcing\n" and len(denials) >= 2,
+             "selinux-avc: enforcing mode and repeated AVC denials are present")
+        emit(bool(denied_path) and denied_path in avc
+             and all(fragment in line and denied_path in line for line in denials),
+             "selinux-avc: denial lines carry the checked fragment and random path")
+        emit(bool(wrong_contexts) and all(value != context for value in wrong_contexts)
+             and context in avc,
+             "selinux-avc: denial has a wrong context and the clue names the correct one")
+        emit(bool(allowed_path) and allowed_path != denied_path
+             and allowed_path not in initial_text
+             and fixed_text == initial_text.replace(denied_path, allowed_path),
+             "selinux-avc: repair changes only the denied source path")
+        reference_match = re.search(r"(/etc/[^/\s`]+/references)", instruction)
+        emit(reference_match is not None,
+             "selinux-avc: instruction names a reference directory without its label answer")
+        if reference_match:
+            reference_dir = os.path.join(out, "fs", reference_match.group(1).lstrip("/"))
+            references = os.listdir(reference_dir) if os.path.isdir(reference_dir) else []
+            emit(context + ".conf" in references,
+                 "selinux-avc: real reference filename carries the canonical context")
+            if context + ".conf" in references:
+                reference_path = os.path.join(reference_dir, context + ".conf")
+                with open(reference_path, encoding="utf-8") as fh:
+                    reference_text = fh.read()
+                emit(context in reference_text and "owner = root" in reference_text
+                     and allowed_path in reference_text
+                     and (os.stat(reference_path).st_mode & 0o777) == 0o644,
+                     "selinux-avc: reference has context, owner, allowed path and readable mode")
+        emit(all(command in instruction for command in
+                  ("getenforce", "ausearch -m avc", "ls -l")),
+             "selinux-avc: instruction teaches getenforce, ausearch and real ls -l")
+        emit(fragment not in instruction and context not in instruction
+             and fragment not in hint_text and context not in hint_text,
+             "selinux-avc: instruction and hints do not reveal hash answers")
+
+    if sid == "port-conflict":
+        holder = dumped[0]["answer"]
+        held_port = dumped[1]["answer"]
+        checked_path = dumped[2]["path"]
+        fixed_text = dumped[2]["answer"]
+        with open(os.path.join(out, "fs", checked_path.lstrip("/")),
+                  encoding="utf-8") as fh:
+            initial_text = fh.read()
+        initial_port = re.search(r"bind_port = (\d+)", initial_text)
+        free_port = re.search(r"bind_port = (\d+)", fixed_text)
+        held_value = initial_port.group(1) if initial_port else ""
+        free_value = free_port.group(1) if free_port else ""
+        ps_text = fixture("ps_aux.txt")
+        ss_text = fixture("ss_tlnp.txt")
+        curl_text = fixture("curl_v.txt")
+        holder_row = next((line for line in ps_text.splitlines()
+                           if re.search(r"\s" + re.escape(holder) + r"\s", line)), "")
+        pid_match = re.match(r"\S+\s+(\d+)\s+", holder_row)
+        connection_match = re.search(r"connection (conn-[0-9a-f]+): refused", curl_text)
+        emit([c["type"] for c in dumped] == ["hash", "hash", "file"],
+             "port-conflict: two hash checks precede the file check")
+        emit(re.fullmatch(r"/etc/([^/]+)/\1\.conf", checked_path) is not None,
+             "port-conflict: checked config follows /etc/<svc>/<svc>.conf")
+        emit(pid_match is not None and pid_match.group(1) in ss_text
+             and holder in ss_text and held_port in ss_text and held_value == held_port,
+             "port-conflict: ps PID/name and ss port identify the same holder")
+        emit(bool(free_value) and free_value != held_value and free_value in ps_text
+             and free_value not in ss_text
+             and fixed_text == initial_text.replace("bind_port = " + held_value,
+                                                     "bind_port = " + free_value),
+             "port-conflict: repair uses the revealed free port and changes only bind_port")
+        emit("localhost:" + held_port in curl_text
+             and "Connection refused" in curl_text and connection_match is not None,
+             "port-conflict: localhost curl failure has the conflicting port and fragment")
+        emit(all(command in instruction for command in
+                  ("ps aux | grep", "ss -tlnp", "curl -v localhost:")),
+             "port-conflict: instruction teaches ps, ss and curl localhost triage")
+        emit(holder not in instruction and held_port not in instruction
+             and (not free_value or free_value not in instruction)
+             and holder not in hint_text and held_port not in hint_text
+             and (not free_value or free_value not in hint_text),
+             "port-conflict: instruction and hints do not reveal answers")
 
 last = stage_lines[-1] if stage_lines else None
 emit(last is not None and dump["final_flag"] == dump["stages"][last]["flag"],
@@ -715,7 +837,7 @@ PY
         fi
     }
 
-    run_generator_case "default six-template troubleshoot generation" default 6
+    run_generator_case "default eight-template troubleshoot generation" default 8
     run_generator_case "original two-template PICK" pilot-pick 2 \
         svc-crashloop,k8s-crashloop
     # A reversed, non-pool order and a deliberately different SET prove PICK
@@ -726,6 +848,10 @@ PY
         nginx-config,dns-mismatch
     run_generator_case "wave-three PICK in reversed order" wave3-reversed 6 \
         dns-mismatch,nginx-config
+    run_generator_case "wave-four two-template PICK" wave4-pick 1 \
+        selinux-avc,port-conflict
+    run_generator_case "wave-four PICK in reversed order" wave4-reversed 8 \
+        port-conflict,selinux-avc
 fi
 
 # ---------------------------------------------------------------- summary
