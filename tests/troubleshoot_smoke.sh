@@ -623,8 +623,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     skip_ "python3 not found; generator integration not exercised"
 elif [ ! -f "$GEN" ]; then
     skip_ "generator/generate.py missing; generator integration not exercised"
-elif ! python3 "$GEN" --help 2>/dev/null | grep -q -- '--profile'; then
-    skip_ "generator has no --profile support yet (pending T17 integration)"
+elif ! python3 "$GEN" --help 2>/dev/null | grep -q -- '--mode'; then
+    skip_ "generator has no --mode support yet (pending T17 integration)"
 else
     cat >"$WORK/gencheck.py" <<'PY'
 import hashlib
@@ -1636,6 +1636,23 @@ PY
     else
         bad "repeat generation changed fixture bytes"
         sed 's/^/        | /' "$WORK/pilot-repeat-fixture-diff.log"
+    fi
+
+    # Canonical MODE naming must map to exactly the same internal generator
+    # profile as the compatibility alias exercised by the existing cases.
+    if python3 "$GEN" --seed "$SEED" --set 2 --mode incident \
+            --pick svc-crashloop,k8s-crashloop --out "$WORK/gen-mode-incident" \
+            --dump-answers "$WORK/answers-mode-incident.json" \
+            >"$WORK/gen-mode-incident.log" 2>&1 \
+            && diff -r "$WORK/gen-mode-incident" "$WORK/gen-pilot-pick" \
+                >"$WORK/mode-incident-diff.log" 2>&1 \
+            && cmp -s "$WORK/answers-mode-incident.json" \
+                "$WORK/answers-pilot-pick.json"; then
+        ok "--mode incident is byte-identical to the compatibility alias"
+    else
+        bad "--mode incident differs from the compatibility alias or failed"
+        sed 's/^/        | /' "$WORK/gen-mode-incident.log"
+        sed 's/^/        | /' "$WORK/mode-incident-diff.log"
     fi
 
     # Compile against the generator's real include and exercise names that do

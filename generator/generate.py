@@ -6,7 +6,7 @@ the directory passed with --out (plus the optional --dump-answers file).
 
 CLI:
     python3 generate.py --seed SEED --set N --out DIR [--dump-answers FILE] \\
-        [--profile terminal|troubleshoot] [--pick id1,id2]
+        [--mode terminal|incident] [--pick id1,id2]
 """
 
 import argparse
@@ -4451,14 +4451,23 @@ def main(argv=None):
     ap.add_argument("--out", default=None, help="output directory")
     ap.add_argument("--dump-answers", dest="dump", default=None,
                     help="write test-only plaintext answers JSON here")
-    ap.add_argument("--profile", choices=["terminal", "troubleshoot"], default="terminal",
-                    help="challenge profile (default: terminal, unchanged output)")
+    ap.add_argument("--mode", choices=["terminal", "incident"], default=None,
+                    help="practice mode (default: terminal)")
+    ap.add_argument("--profile", choices=["terminal", "troubleshoot"], default=None,
+                    help=argparse.SUPPRESS)
     ap.add_argument("--pick", dest="pick", default=None, metavar="ID1,ID2",
-                    help="troubleshoot only: use exactly these template ids, in this order")
+                    help="Incident mode only: use exactly these template ids, in this order")
     ap.add_argument("--self-test", dest="self_test", metavar="SEEDS", default=None,
                     help="generate a full set for each comma-separated seed and "
                          "cross-check every answer against the artefacts on disk")
     args = ap.parse_args(argv)
+
+    mode_to_profile = {"terminal": "terminal", "incident": "troubleshoot"}
+    if args.mode is not None and args.profile is not None \
+            and mode_to_profile[args.mode] != args.profile:
+        ap.error("--mode and --profile select different modes")
+    profile = mode_to_profile[args.mode] if args.mode is not None \
+        else (args.profile or "terminal")
 
     if args.self_test is not None:
         try:
@@ -4474,19 +4483,19 @@ def main(argv=None):
 
     pick = None
     if args.pick is not None:
-        if args.profile != "troubleshoot":
-            ap.error("--pick is only valid with --profile troubleshoot")
+        if profile != "troubleshoot":
+            ap.error("--pick is only valid with --mode incident")
         pick = [part.strip() for part in args.pick.split(",") if part.strip()]
         if len(pick) != len(set(pick)):
             ap.error("--pick must not contain duplicate template ids")
         unknown = [tid for tid in pick if tid not in TROUBLESHOOT_IDS]
         if unknown:
-            ap.error("unknown troubleshoot template id(s): %s (choose from %s)"
+            ap.error("unknown Incident mode template id(s): %s (choose from %s)"
                      % (", ".join(unknown), ", ".join(TROUBLESHOOT_IDS)))
         if not pick:
             ap.error("--pick must name at least one template id")
 
-    if args.profile == "troubleshoot":
+    if profile == "troubleshoot":
         if pick is None and not 1 <= args.set_size <= len(TROUBLESHOOT_IDS):
             ap.error("--set must be between 1 and %d without --pick" % len(TROUBLESHOOT_IDS))
     elif not 1 <= args.set_size <= len(ALL_IDS):
@@ -4494,7 +4503,7 @@ def main(argv=None):
 
     stages, order, final_flag = write_outputs(
         args.seed, args.set_size, args.out, args.dump,
-        profile=args.profile, pick=pick,
+        profile=profile, pick=pick,
     )
     print("seed=%d stages=%d order=%s final_flag=%s" % (
         args.seed, len(stages), ",".join(order), final_flag

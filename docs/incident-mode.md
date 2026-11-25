@@ -1,23 +1,23 @@
-# Troubleshooting challenges: the troubleshoot profile
+# Incident mode
 
-The trainer's second profile is a pool of sixteen diagnostic drills whose terminal
-commands are answered from fixtures instead of a live machine. It exists to
-practise the read-then-repair loop — inspect the evidence, decide on one change,
-make it, prove it — without shipping a privileged container, a systemd host or a
+Incident mode is a pool of sixteen diagnostic drills whose terminal commands are
+answered from fixtures instead of a live machine. It exists to practise the
+read-then-repair loop — inspect the evidence, decide on one change, make it,
+prove it — without shipping a privileged container, a systemd host or a
 Kubernetes cluster.
 
 Everything outside the drills is unchanged: the same sshd/entrypoint image
 layout, the same setuid `verify`, the same `/var/lib/sre-trainer/state/`
-progress and the same flag, timing and record flow. If you have used the default
-profile, the interaction is identical; only the stages differ.
+progress and the same flag, timing and record flow. If you have used Terminal
+mode, the interaction is identical; only the stages differ.
 
-- Profile flag: `PROFILE=troubleshoot`
+- Mode selector: `MODE=incident`
 - Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`,
   `nginx-config`, `dns-mismatch`, `selinux-avc`, `port-conflict`, `oom-kill`,
   `image-pull`, `svc-selector`, `resource-limits`, `tls-expiry`, `dependency-down`,
   `blocked-port`, `perm-denied`
 - Image / container: `sre-terminal-trainer-troubleshoot:local` / `sre-trainer-troubleshoot`
-  (separate from the default names, so both profiles can run side by side)
+  (separate from the Terminal mode names, so both modes can run side by side)
 
 ## The sixteen templates
 
@@ -325,7 +325,7 @@ Orchestration detail, not something a trainee needs to act on.
   `systemctl`, `journalctl`, `ps`, `ss`, `curl`, `df`, `free`, `top`, `du`,
   `nginx`, `getenforce`, `ausearch`, `dig`, `nslookup`, `ping`, `nc`, `docker`,
   `podman`, `kubectl`.
-- **PATH ordering is part of the contract.** The troubleshoot image sets
+- **PATH ordering is part of the contract.** The Incident mode image sets
   `PATH="/usr/local/bin:…"` so the mocks shadow both BusyBox applets in `/bin`
   and any package tool in `/usr/bin`.
 - **Fixtures are flat files.** The generator writes 32 named text files; the
@@ -385,37 +385,37 @@ Orchestration detail, not something a trainee needs to act on.
 ## Running it
 
 ```sh
-make up PROFILE=troubleshoot                         # seeded selection of all sixteen
+make up MODE=incident                         # seeded selection of all sixteen
 # Or choose an exact, ordered subset:
-make up PROFILE=troubleshoot PICK=disk-full,container-crash
+make up MODE=incident PICK=disk-full,container-crash
 make ssh
 ```
 
 - `PICK` names any non-empty subset and its exact order for this build
   (`--pick` in the generator). With `PICK` set, `SET` does not decide the count;
   the picked list does.
-- With no `PICK`, this profile defaults to `SET=16`, selecting all sixteen
+- With no `PICK`, Incident mode defaults to `SET=16`, selecting all sixteen
   templates in seeded order. `SET=1` through `15` selects that many from the
-  pool; values outside 1–16 are rejected before the build. The terminal profile
-  keeps its default `SET=8`.
-- `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
-  corpus; the generator layer is keyed on the build arguments, so an unchanged
-  `SEED` and `PICK` reuse the cached layer.
-- `make up` prints the seed, port, credentials and the stage list. For this
-  profile it also echoes `profile=troubleshoot pick=…`.
+  pool; values outside 1–16 are rejected before the build. Terminal mode keeps
+  its default `SET=8`.
+- `SEED=` and `PORT=` work as in Terminal mode. A new seed rebuilds the corpus;
+  the generator layer is keyed on the build arguments, so an unchanged `SEED`
+  and `PICK` reuse the cached layer.
+- `make up` prints the seed, port, credentials and the stage list. For Incident
+  mode it also echoes `mode=incident pick=…`.
 
 ## Replay with a seed
 
 The generated corpus is deterministic for a given `SEED` **and** `PICK`.
 
 ```sh
-make down
-make up PROFILE=troubleshoot PICK=disk-full,container-crash SEED=1234
+make down MODE=incident
+make up MODE=incident PICK=disk-full,container-crash SEED=1234
 ```
 
 - `make up` records the seed in `.instance/seed` and reuses it until you pass a
   new `SEED=` or run `make new`.
-- Replay needs both halves. The same seed under a different `PROFILE` or `PICK`
+- Replay needs both halves. The same seed under a different `MODE` or `PICK`
   is a different challenge set — that is expected, not a lost seed.
 - `make status` prints the stored seed and the container's stage list, which is
   the quickest way to confirm what you are replaying.
@@ -435,9 +435,9 @@ verify hint 9      # show everything for the stage
 verify status      # stage, elapsed time, checks done
 ```
 
-## Knowing when the profile is solved
+## Knowing when the mode is solved
 
-The flow is the default profile's flow, per stage:
+The flow is the same as Terminal mode, per stage:
 
 1. Read the brief (`verify next`). It lists every check id and its submit form.
 2. Submit hash checks with `verify check <check-id> <answer>`. Answers are the
@@ -451,7 +451,8 @@ The flow is the default profile's flow, per stage:
 4. Checks may be submitted in any order. `verify stage` prints the stage flag
    once every check in the stage passes; `verify unlock <flag>` advances.
 5. After the last stage is unlocked, `verify finish <final-flag>` records the
-   run. Then `make down` (save the record) and `make best` (compare runs).
+   run. Then `make down MODE=incident` (save the record) and `make best` (compare
+   runs).
 
 A stage is solved when `verify stage` prints its flag — not when the service
 "looks fixed", because nothing is actually restarted.
@@ -476,9 +477,9 @@ A stage is solved when `verify stage` prints its flag — not when the service
   scenario and re-run the service to confirm it; the file check compares the
   bytes to the expected corrected file. That is why the briefs describe the
   exact end state.
-- **Throwaway container.** Your edits live inside the container. `make down`
-  removes it, so unrecorded work is gone; the completion record is the only
-  thing that persists.
+- **Throwaway container.** Your edits live inside the container.
+  `make down MODE=incident` removes it, so unrecorded work is gone; the
+  completion record is the only thing that persists.
 - **Fixed pool.** There are sixteen templates. Fixtures for commands the picked
   stages do not use are still shipped, but they print a neutral placeholder
   instead of scenario data.

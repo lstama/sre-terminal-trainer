@@ -18,10 +18,11 @@ SHELL := /bin/sh
 # podman (build/run/exec/ps/logs/inspect/cp/image/rm/rmi).
 ENGINE    ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 
-# terminal (default) is the original drill set and original image/container
-# names. troubleshoot uses the mock-command image and its own names so it can
-# run alongside a terminal instance.
-PROFILE   ?= terminal
+# MODE is the public selector. Keep the existing PROFILE values internally so
+# Docker build args and generator calls remain unchanged. PROFILE=troubleshoot
+# is accepted as an unadvertised compatibility alias for MODE=incident.
+MODE      ?= $(if $(filter troubleshoot,$(PROFILE)),incident,$(if $(filter terminal,$(PROFILE)),terminal,$(if $(PROFILE),$(PROFILE),terminal)))
+override PROFILE := $(if $(filter incident,$(MODE)),troubleshoot,$(if $(filter terminal,$(MODE)),terminal,$(MODE)))
 PICK      ?=
 
 ifeq ($(PROFILE),troubleshoot)
@@ -37,7 +38,7 @@ BUILD_PROFILE_ARGS :=
 endif
 
 PORT      ?= 2222
-# Terminal keeps its original eight-stage default; troubleshoot defaults to all sixteen.
+# Terminal keeps its original eight-stage default; Incident defaults to all sixteen.
 SET       ?= $(if $(filter troubleshoot,$(PROFILE)),16,8)
 SEED      ?=
 SSH_USER  ?= trainee
@@ -57,34 +58,34 @@ help:
 	@printf '%s\n' \
 	  'sre-terminal-trainer' \
 	  '' \
-	  '  make up [SEED=1234] [SET=8] [PORT=2222]' \
-	  '                           build the image and start the container' \
-	  '  make up PROFILE=troubleshoot PICK=svc-crashloop,k8s-crashloop' \
-	  '                           build the mock-command troubleshoot image and start it' \
+	  '  make up [MODE=terminal] [SEED=1234] [SET=8] [PORT=2222]' \
+	  '                           build the image and start Terminal mode' \
+	  '  make up MODE=incident [PICK=svc-crashloop,k8s-crashloop]' \
+	  '                           build the mock-command Incident mode image and start it' \
 	  '  make ssh                log in as the trainee (password prompt)' \
 	  '  make status             container, credentials, seed, stage and record status' \
 	  '  make down               save completion records, then remove the container' \
 	  '  make new                down + up with a fresh random seed' \
 	  '  make best               local completion records, fastest first' \
-	  '  make test               verifier + troubleshoot smoke, up/down, clean tree' \
+	  '  make test               verifier + Incident mode smoke, up/down, clean tree' \
 	  '  make demo               re-record docs/demo/sample-run.mp4 and .gif (needs vhs)' \
 	  '  make demo-mp4           re-record only the MP4 deliverable' \
 	  '  make demo-gif           re-record only the GIF deliverable' \
 	  '  make clean              remove container, image, .instance/ and state/' \
 	  '' \
-	  'Variables: ENGINE (podman|docker, auto-detected), IMAGE, CONTAINER,' \
-	  '           PORT, SET, SEED, SSH_USER, INSTANCE (.instance), STATE (state),' \
-	  '           PROFILE (terminal|troubleshoot, default terminal),' \
-	  '           PICK (comma-separated troubleshoot template ids; empty = seeded selection from the pool)' \
+	  'Variables: MODE (terminal|incident, default terminal),' \
+	  '           ENGINE (podman|docker, auto-detected), IMAGE, CONTAINER,' \
+	  '           PORT, SET, PICK (Incident mode template ids), SEED, SSH_USER,' \
+	  '           INSTANCE (.instance), STATE (state)' \
 	  '' \
 	  'State lives in .instance/ (0600 credentials) and state/ (records).' \
 	  'Both are gitignored; only source, config and docs are committed.'
 
 up:
-	@if [ '$(PROFILE)' = troubleshoot ] && [ -z '$(PICK)' ]; then
+	@if [ '$(MODE)' = incident ] && [ -z '$(PICK)' ]; then
 	  case '$(SET)' in
 	    1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16) ;;
-	    *) echo "error: PROFILE=troubleshoot supports SET=1..16 (pool of 16 templates); got $(SET)" >&2; exit 1 ;;
+	    *) echo "error: MODE=incident supports SET=1..16 (pool of 16 templates); got $(SET)" >&2; exit 1 ;;
 	  esac
 	fi
 	@mkdir -p $(INSTANCE) $(STATE)
@@ -112,12 +113,12 @@ up:
 	  echo "error: port $(PORT) is already in use; retry with PORT=<free port>" >&2
 	  exit 1
 	fi
-	case '$(PROFILE)' in
-	  terminal|troubleshoot) ;;
-	  *) echo "error: PROFILE must be terminal or troubleshoot" >&2; exit 1 ;;
+	case '$(MODE)' in
+	  terminal|incident) ;;
+	  *) echo "error: MODE must be terminal or incident" >&2; exit 1 ;;
 	esac
-	if [ '$(PROFILE)' = troubleshoot ]; then
-	  printf '==> profile=troubleshoot pick=%s (image/container names are the troubleshoot ones)\n' '$(PICK)'
+	if [ '$(MODE)' = incident ]; then
+	  printf '==> mode=incident pick=%s (using dedicated image/container names)\n' '$(PICK)'
 	fi
 	printf '==> building %s (seed=%s set=%s, engine=%s)\n' '$(IMAGE)' "$$seed" '$(SET)' '$(ENGINE)'
 	$(ENGINE) build $(BUILD_TARGET:%=--target %) \
@@ -218,7 +219,7 @@ best:
 test:
 	@printf '==> verifier smoke\n'
 	sh tests/smoke.sh
-	@printf '==> troubleshoot smoke\n'
+	@printf '==> Incident mode smoke\n'
 	sh tests/troubleshoot_smoke.sh
 	@printf '==> up/down cycle\n'
 	$(MAKE) --no-print-directory up
