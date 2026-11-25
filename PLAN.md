@@ -84,11 +84,15 @@ egress); the drills are all local files.
   was needed; the loopback publish and the 4755 verifier behave identically (rootless
   Podman maps container-root into the user namespace, where setuid still works).
 - **Host credentials are generated per instance** by `up` (mode 0600, never committed).
-- **Day 2 is the `troubleshoot` profile.** A second profile (`PROFILE=troubleshoot`)
-  reuses the same harness for a two-stage pilot (`svc-crashloop`, `k8s-crashloop`) whose
-  `systemctl`/`journalctl`/`ss`/`kubectl` commands are mocked. "Profile" names the
-  `PROFILE=` mechanism; "pilot" names the two-stage content set. Details:
-  `docs/troubleshooting.md`.
+- **The `troubleshoot` profile provides the second set of challenges.** The `PROFILE=troubleshoot` profile
+  reuses the same harness for sixteen diagnostic templates (`svc-crashloop`,
+  `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`,
+  `selinux-avc`, `port-conflict`, `oom-kill`, `image-pull`, `svc-selector`,
+  `resource-limits`, `tls-expiry`, `dependency-down`, `blocked-port`,
+  `perm-denied`). Their service commands are mocked; `ls -l`/`stat` read real
+  ownership metadata on reference assets. Shared socket, curl, journal,
+  enforcement/AVC, resource, container and Kubernetes fixtures compose evidence
+  when multiple selected stages need them. Details: `docs/troubleshooting.md`.
 
 ## Task split
 
@@ -101,6 +105,11 @@ egress); the drills are all local files.
 | T05 | Fix review findings, dynamic end-to-end verification, walkthrough | done |
 | T06 | Read-only static recheck of the fixed harness | done |
 | T07 | Docker/Podman engine abstraction, Podman install, both-engine verification | done |
+| T30 | Add `selinux-avc` and `port-conflict`; expand troubleshoot pool to eight | done |
+| T33 | Add `oom-kill` and `image-pull`; expand troubleshoot pool to ten | done |
+| T35 | Add `svc-selector` and `resource-limits`; expand troubleshoot pool to twelve | done |
+| T37 | Add `tls-expiry` and `dependency-down`; expand troubleshoot pool to fourteen | done |
+| T39 | Add `blocked-port` and `perm-denied`; expand troubleshoot pool to sixteen | done |
 
 ## Open questions
 

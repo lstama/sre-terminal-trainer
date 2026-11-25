@@ -37,8 +37,8 @@ BUILD_PROFILE_ARGS :=
 endif
 
 PORT      ?= 2222
-# The troubleshoot pilot has only two templates; keep the terminal default at 8.
-SET       ?= $(if $(filter troubleshoot,$(PROFILE)),2,8)
+# Terminal keeps its original eight-stage default; troubleshoot defaults to all sixteen.
+SET       ?= $(if $(filter troubleshoot,$(PROFILE)),16,8)
 SEED      ?=
 SSH_USER  ?= trainee
 
@@ -60,7 +60,7 @@ help:
 	  '  make up [SEED=1234] [SET=8] [PORT=2222]' \
 	  '                           build the image and start the container' \
 	  '  make up PROFILE=troubleshoot PICK=svc-crashloop,k8s-crashloop' \
-	  '                           build the mock-command pilot image and start it' \
+	  '                           build the mock-command troubleshoot image and start it' \
 	  '  make ssh                log in as the trainee (password prompt)' \
 	  '  make status             container, credentials, seed, stage and record status' \
 	  '  make down               save completion records, then remove the container' \
@@ -81,10 +81,10 @@ help:
 	  'Both are gitignored; only source, config and docs are committed.'
 
 up:
-	@if [ '$(PROFILE)' = troubleshoot ]; then
+	@if [ '$(PROFILE)' = troubleshoot ] && [ -z '$(PICK)' ]; then
 	  case '$(SET)' in
-	    1|2) ;;
-	    *) echo "error: PROFILE=troubleshoot supports SET=1 or SET=2 (pilot range 1-2); got $(SET)" >&2; exit 1 ;;
+	    1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16) ;;
+	    *) echo "error: PROFILE=troubleshoot supports SET=1..16 (pool of 16 templates); got $(SET)" >&2; exit 1 ;;
 	  esac
 	fi
 	@mkdir -p $(INSTANCE) $(STATE)

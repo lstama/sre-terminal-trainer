@@ -22,10 +22,54 @@ included), with a real 8/8 solve under Podman.
 - T07: Docker/Podman engine abstraction in the `Makefile` (`ENGINE`, auto-detected), docs
   updated, Podman 6.2.0 installed rootless, and both engines verified live.
   Details: `.agent/reports/T07-podman.md`.
-- Day 2 (branch `feat/troubleshoot-pilot`): the `troubleshoot` profile — a two-stage pilot
-  (`svc-crashloop`, `k8s-crashloop`) with mocked `systemctl`/`journalctl`/`ss`/`kubectl`.
-  "Profile" is the `PROFILE=` mechanism; "pilot" is the two-stage content set.
-  Details: `docs/troubleshooting.md`.
+- Troubleshooting challenges: the `troubleshoot` profile has sixteen templates (`svc-crashloop`,
+  `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`,
+  `selinux-avc`, `port-conflict`, `oom-kill`, `image-pull`, `svc-selector`,
+  `resource-limits`, `tls-expiry`, `dependency-down`, `blocked-port`,
+  `perm-denied`). Diagnostic commands are mocked; reference ownership is real
+  image metadata. Details: `docs/troubleshooting.md`.
+- T26 (`feat/troubleshoot-wave3`): added `nginx-config` and `dns-mismatch`, expanded
+  the default troubleshoot pool to six, and extended docs/smoke/self-test coverage.
+  Docker verification includes a full two-stage SSH solve with both file repairs;
+  `make test` passes 111 verifier and 369 troubleshoot assertions.
+- T28 (`feat/troubleshoot-wave3`): fixed the literal `%%` in the generated DNS ping
+  fixture and made `PICK` override troubleshoot `SET` range validation. Verified
+  `PICK=nginx-config,dns-mismatch SET=8` with a full two-stage Docker SSH solve and
+  record save; no-PICK `SET=7` is still rejected before side effects.
+- T30 (`feat/troubleshoot-wave4`): added `selinux-avc` and `port-conflict`, expanded
+  the default troubleshoot pool/SET to eight, and added deterministic composition
+  for shared socket/curl fixtures. Host generator, smoke and determinism checks
+  pass. Docker SSH verification solved both stages with both repairs and saved one
+  record. `make test` passes 111 verifier and 547 troubleshoot assertions; a default
+  Docker troubleshoot boot also reports eight stages and 30 fixtures.
+- T33 (`feat/troubleshoot-wave5`): added `oom-kill` and `image-pull`, expanded the
+  default troubleshoot pool/SET to ten, and added deterministic shared-fixture
+  composition. All 1,023 non-empty subsets passed in forward/reverse order with
+  30 fixtures each. Docker SSH solved both stages with both repairs and saved one
+  record; a default boot reports ten stages. `make test` passes 111 verifier and
+  710 troubleshoot assertions with a clean tree.
+- T35 (`feat/troubleshoot-wave6`): added `svc-selector` and `resource-limits`,
+  expanded the default troubleshoot pool/SET to twelve and the fixture contract
+  to 32, and added canonical shared-Kubernetes evidence composition. All 4,095
+  non-empty subsets passed in forward/reverse order (8,190 runs) with 32 fixtures
+  each. Docker SSH solved both stages with both YAML repairs and saved one record;
+  a default boot reports twelve stages. `make test` passes 111 verifier and 1,026
+  troubleshoot assertions with a clean tree.
+- T37 (`feat/troubleshoot-wave7`): added `tls-expiry` and `dependency-down`,
+  expanded the default troubleshoot pool/SET to fourteen, and added associative
+  labelled status/journal/DNS/ping/nc fixture composition. All 16,383 non-empty
+  subsets passed in forward/reverse order (32,766 runs) with 32 fixtures each.
+  Docker SSH solved both stages with both config repairs and saved one record;
+  a default boot reports fourteen stages. Details:
+  `.agent/reports/T37-wave7-implementation.md`.
+- T39 (`feat/troubleshoot-wave8`): added `blocked-port` and `perm-denied`,
+  expanded the default pool/SET to sixteen, and added labelled enforcement/AVC
+  composition plus a neutral nginx-owned reference tree for real permission
+  metadata. All 65,535 non-empty subsets passed in forward/reverse order
+  (131,070 runs), each with 32 fixtures. Docker SSH solved both stages with both
+  repairs and saved one record; a default boot reported sixteen stages. Host
+  smoke passes 111 verifier and 2,063 troubleshoot assertions. Details:
+  `.agent/reports/T39-wave8-implementation.md`.
 
 ## Fixes landed in T05
 
@@ -83,7 +127,7 @@ other system configuration was changed.
   with `SSH_ASKPASS`+`setsid`, same `ssh` flags as `make ssh`): `id` → trainee,
   `verify next` prints the stage brief, `verify status`, `verify hint`, a wrong answer
   rejected with rc 1, a correct check accepted, `verify stage` produced
-  `FLAG{18882a3da581}`, `verify unlock` advanced to stage 2.
+  a stage flag, and `verify unlock` advanced to stage 2.
 - Full 8/8 solve as uid 1000 under Podman (seed 4242, order conf-hunt … deploy-error): 77
   asserted steps, 0 failures — every hash and file check (20 000-line line replacement,
   CRLF fix, config-drift restore, cut-paste reorder written byte-exact through stdin),

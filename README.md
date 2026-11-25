@@ -48,16 +48,18 @@ make best        # your local runs, fastest first
 
 `make new` tears down and starts a fresh challenge set. Run `make help` for the full target list.
 
-## Day 2 troubleshoot profile (pilot)
+## Troubleshoot profile
 
-A second profile (`PROFILE=troubleshoot`) reuses this same harness for two diagnostic stages that exercise the service and Kubernetes troubleshooting commands — `systemctl`, `journalctl`, `ss` and `kubectl`. Those commands are mocked: one small compiled binary is symlinked under each command name and prints a fixture, so there is no systemd, no privileged container and no Kubernetes cluster behind them.
+A second profile (`PROFILE=troubleshoot`) reuses this same harness for sixteen diagnostic templates: service and Kubernetes crash loops (`svc-crashloop`, `k8s-crashloop`), disk-space and container-crash triage (`disk-full`, `container-crash`), nginx configuration/ownership checks (`nginx-config`), DNS/endpoint mismatch triage (`dns-mismatch`), SELinux access-denial investigation (`selinux-avc`), process/port collision triage (`port-conflict`), memory-exhaustion/OOM investigation (`oom-kill`), container-image pull failures (`image-pull`), Kubernetes Service-selector mismatch triage (`svc-selector`), Kubernetes OOM/resource-limit investigation (`resource-limits`), TLS certificate-expiry investigation (`tls-expiry`), downstream-dependency failure triage (`dependency-down`), filtered-port/unreachable-service triage (`blocked-port`), and file permission/ownership triage (`perm-denied`). Alongside `systemctl`, `journalctl`, `ss`, `ps`, `kubectl`, `df`, `du`, `free`, `top`, `docker` and `podman`, they exercise `nginx -t`, `ls -l`, `stat`, `getenforce`, `ausearch`, `curl`, `dig`, `nslookup`, `ping` and `nc`. The diagnostic commands are mocked: one small compiled binary is symlinked under each command name and prints a fixture, while `ls -l` and `stat` read real file metadata. There is no privileged container, live service stack, web server or container runtime behind them.
 
 ```sh
-make up PROFILE=troubleshoot PICK=svc-crashloop,k8s-crashloop
+make up PROFILE=troubleshoot                         # all sixteen, seeded order
+# Or choose an exact subset and order:
+make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
 ```
 
-The briefs, hints, checks, flags, `verify` commands, timing records and `make down` / `make best` work exactly as above — only the drills change. Full pilot notes: [docs/troubleshooting.md](docs/troubleshooting.md).
+The briefs, hints, checks, flags, `verify` commands, timing records and `make down` / `make best` work exactly as above — only the drills change. Full notes: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Make targets
 
@@ -69,10 +71,10 @@ The briefs, hints, checks, flags, `verify` commands, timing records and `make do
 | `make down` | Copy completion records to `state/`, then stop and remove the container. |
 | `make new` | `down`, then `up` with a fresh seed. |
 | `make best` | Local records, fastest first. |
-| `make test` | One up/down cycle, then assert the working tree is clean. |
+| `make test` | Run both terminal and troubleshoot smoke suites, then one up/down cycle; assert the working tree is clean. |
 | `make clean` | Remove the container, image, `.instance/` and `state/`. |
 
-Variables: `ENGINE`, `IMAGE`, `CONTAINER`, `PORT`, `SET` (stages per run, default 8), `SEED`, `SSH_USER`, `INSTANCE` (credentials dir, default `.instance`) and `STATE` (records dir, default `state/`). Every target honours `ENGINE`, including the recursive `make` calls in `new` and `test`. The demo recorder uses `INSTANCE`/`STATE` to keep its own throwaway files.
+Variables: `ENGINE`, `IMAGE`, `CONTAINER`, `PORT`, `SET` (stages per run; default 8 for terminal and 16 for troubleshoot), `SEED`, `SSH_USER`, `INSTANCE` (credentials dir, default `.instance`) and `STATE` (records dir, default `state/`). Every target honours `ENGINE`, including the recursive `make` calls in `new` and `test`. The demo recorder uses `INSTANCE`/`STATE` to keep its own throwaway files.
 
 ## How it works
 
