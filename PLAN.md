@@ -113,6 +113,7 @@ egress); the drills are all local files.
 | T37 | Add `tls-expiry` and `dependency-down`; expand troubleshoot pool to fourteen | done |
 | T39 | Add `blocked-port` and `perm-denied`; expand troubleshoot pool to sixteen | done |
 | T46 | Mock aliases, seed-validated not-found errors and fixture-free command help | done |
+| T48 | Bare kubectl list aliases and accurate df help text | done |
 
 ## Open questions
 

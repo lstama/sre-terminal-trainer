@@ -56,8 +56,8 @@ ConfigMap:
 | `kubectl describe pod <pod>` | Container state, last termination, which config key the environment requests |
 | `kubectl logs <pod>` | The container's own failure reason |
 | `kubectl get events` | Back-off and configuration-related events with a reason code |
-| `kubectl get configmap <name>` | The keys the ConfigMap actually defines |
-| `kubectl get deploy <name>` | Deployment readiness (context only) |
+| `kubectl get configmap [name]` | The keys the ConfigMap actually defines |
+| `kubectl get deploy [name]` | Deployment readiness (context only) |
 
 One check is a hash check over the pod name and crash reason; one is a hash
 check over the config key the container reports as missing; one is a file check
@@ -213,7 +213,7 @@ then correlate the endpoint controller, events, pod description and deployment:
 | `kubectl get events` | `EndpointsNotFound` and the matching mismatch fragment |
 | `kubectl get pods` | Randomized pod names and labels, including non-matching candidates |
 | `kubectl describe pod <pod>` | The affected pod's labels and Service-match context |
-| `kubectl get deploy <name>` | Deployment readiness and workload identity |
+| `kubectl get deploy [name]` | Deployment readiness and workload identity |
 | `curl -v http://<cluster-ip>:<port>/` | Refused connection to the Service address |
 
 Two hash checks use the Service name and selector-mismatch fragment. The file
@@ -233,7 +233,7 @@ before editing the workload:
 | `kubectl describe pod <pod>` | Last termination `OOMKilled`, `BestEffort` QoS, no limits, OOM fragment and memory-policy clue |
 | `kubectl get events` | OOM event, incident fragment and reviewed memory limit |
 | `kubectl logs <pod>` | Container-side corroboration of the OOM and recommended limit |
-| `kubectl get deploy <name>` | Deployment readiness and workload identity |
+| `kubectl get deploy [name]` | Deployment readiness and workload identity |
 
 Two hash checks use the pod name and OOM incident fragment. The file check
 repairs a deployment under `/home/trainee/k8s/` by inserting only the missing
@@ -346,9 +346,12 @@ Orchestration detail, not something a trainee needs to act on.
   100 --no-pager` accepts `-u` / `--unit` / `--unit=`, `-n` / `--lines` /
   `--lines=`, and `--no-pager` in any order; `-xe`, `-x -e` and `-ex` are
   equivalent. `kubectl` resource types are case-insensitive and accept
-  singular, plural and short forms (`po`, `cm`, `ep`, `ev`, `svc`, `deploy`),
-  including `TYPE/NAME` selectors. Its common `-n` / `--namespace`, `-o` /
-  `--output` and `-A` / `--all-namespaces` flags select the same frozen fixture.
+  singular, plural and short forms (`po`, `cm`, `ep`, `ev`, `svc`, `deploy`).
+  Bare resource forms list the fixture without a name (for example,
+  `kubectl get deploy`, `kubectl get deployment`, `kubectl get po` and
+  `kubectl get cm`); supported `NAME` and `TYPE/NAME` forms validate against the
+  compiled names. Common `-n` / `--namespace`, `-o` / `--output` and `-A` /
+  `--all-namespaces` flags select the same frozen fixture.
   `systemctl status UNIT` accepts UNIT with or without `.service`.
   `docker`/`podman` accept `ps -a` / `ps --all`, `container ps|ls|list -a`,
   `logs`, `inspect`, `container logs` and `container inspect`. The general

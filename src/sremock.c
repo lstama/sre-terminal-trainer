@@ -146,11 +146,11 @@ static const char *const DEPLOY_ALIASES[] = {
 
 static const KubectlResource KUBECTL_RESOURCES[] = {
     {"pods", POD_ALIASES, ARRAY_LEN(POD_ALIASES), "kubectl_get_pods.txt", 1, 1},
-    {"configmaps", CM_ALIASES, ARRAY_LEN(CM_ALIASES), "kubectl_get_configmap.txt", 0, 1},
+    {"configmaps", CM_ALIASES, ARRAY_LEN(CM_ALIASES), "kubectl_get_configmap.txt", 1, 1},
     {"endpoints", EP_ALIASES, ARRAY_LEN(EP_ALIASES), "kubectl_get_endpoints.txt", 1, 1},
     {"events", EV_ALIASES, ARRAY_LEN(EV_ALIASES), "kubectl_get_events.txt", 1, 0},
     {"services", SVC_ALIASES, ARRAY_LEN(SVC_ALIASES), "kubectl_get_svc.txt", 1, 1},
-    {"deployments", DEPLOY_ALIASES, ARRAY_LEN(DEPLOY_ALIASES), "kubectl_get_deploy.txt", 0, 1},
+    {"deployments", DEPLOY_ALIASES, ARRAY_LEN(DEPLOY_ALIASES), "kubectl_get_deploy.txt", 1, 1},
 };
 
 static const char *const CONTAINER_PS_ALIASES[] = {"ps", "ls", "list"};
@@ -336,7 +336,7 @@ typedef struct {
 static const SimpleHelp SIMPLE_HELP[] = {
     {"ps", "ps aux", "Full process-table fixture."},
     {"ss", "ss -tlnp", "Listening TCP socket fixture."},
-    {"df", "df -h", "Human-readable filesystem fixture; -h is a data flag for df."},
+    {"df", "df -h", "Human-readable filesystem fixture; -h means human-readable sizes, not help."},
     {"free", "free -m", "Memory fixture in MiB."},
     {"top", "top", "Process and memory snapshot fixture."},
     {"du", "du -sh DIR", "Human-readable directory-size fixture."},
@@ -359,7 +359,12 @@ static int print_simple_help(const char *command)
             puts(SIMPLE_HELP[i].description);
             puts("");
             puts("Options:");
-            puts("  -h, --help display this help and exit");
+            if (is_arg(command, "df")) {
+                puts("  -h, --human-readable  print sizes in human-readable form");
+                puts("  --help                display this help and exit");
+            } else {
+                puts("  -h, --help display this help and exit");
+            }
             return 1;
         }
     }

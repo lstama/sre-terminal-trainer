@@ -421,30 +421,49 @@ expect_reject "journalctl -u with a missing value is rejected" 'unsupported invo
     journalctl -u -n 100 --no-pager
 
 printf '\n== kubectl ==\n'
-expect_fixture "kubectl get pods -> kubectl_get_pods.txt" kubectl_get_pods.txt kubectl get pods
-expect_fixture "kubectl get po shorthand" kubectl_get_pods.txt kubectl get po
+expect_fixture "kubectl get pods bare list form" kubectl_get_pods.txt kubectl get pods
+expect_fixture "kubectl get pod bare singular list alias" kubectl_get_pods.txt kubectl get pod
+expect_fixture "kubectl get po bare shorthand list alias" kubectl_get_pods.txt kubectl get po
 expect_fixture "kubectl resource types are case-insensitive" kubectl_get_pods.txt kubectl get PoD
 expect_fixture "kubectl get pod NAME validates a real pod" kubectl_get_pods.txt \
     kubectl get pod demo-aaaa-bbbb
 expect_fixture "kubectl TYPE/NAME selector" kubectl_get_pods.txt \
     kubectl get pods/demo-aaaa-bbbb
-expect_fixture "kubectl get cm shorthand" kubectl_get_configmap.txt \
+expect_fixture "kubectl get configmap bare singular list alias" kubectl_get_configmap.txt \
+    kubectl get configmap
+expect_fixture "kubectl get configmaps bare plural list form" kubectl_get_configmap.txt \
+    kubectl get configmaps
+expect_fixture "kubectl get cm bare shorthand list alias" kubectl_get_configmap.txt \
+    kubectl get cm
+expect_fixture "kubectl get cm NAME shorthand" kubectl_get_configmap.txt \
     kubectl get cm demo-config
 expect_fixture "kubectl plural ConfigMaps TYPE/NAME selector" kubectl_get_configmap.txt \
     kubectl get ConfigMaps/demo-config
-expect_fixture "kubectl get svc -> kubectl_get_svc.txt" kubectl_get_svc.txt kubectl get svc
+expect_fixture "kubectl get svc bare shorthand list alias" kubectl_get_svc.txt kubectl get svc
+expect_fixture "kubectl get service bare singular list alias" kubectl_get_svc.txt kubectl get service
+expect_fixture "kubectl get services bare plural list form" kubectl_get_svc.txt kubectl get services
 expect_fixture "kubectl get services NAME" kubectl_get_svc.txt \
     kubectl get services demo-service
 expect_fixture "kubectl get service/NAME selector" kubectl_get_svc.txt \
     kubectl get service/demo-service
-expect_fixture "kubectl get ep shorthand" kubectl_get_endpoints.txt kubectl get ep
+expect_fixture "kubectl get ep bare shorthand list alias" kubectl_get_endpoints.txt kubectl get ep
+expect_fixture "kubectl get endpoint bare singular list alias" kubectl_get_endpoints.txt \
+    kubectl get endpoint
+expect_fixture "kubectl get endpoints bare plural list form" kubectl_get_endpoints.txt \
+    kubectl get endpoints
 expect_fixture "kubectl get endpoints NAME" kubectl_get_endpoints.txt \
     kubectl get endpoints demo-service
 expect_fixture "kubectl get endpoint/NAME selector" kubectl_get_endpoints.txt \
     kubectl get endpoint/demo-service
-expect_fixture "kubectl get ev shorthand" kubectl_get_events.txt kubectl get ev
-expect_fixture "kubectl get events -> kubectl_get_events.txt" kubectl_get_events.txt \
+expect_fixture "kubectl get ev bare shorthand list alias" kubectl_get_events.txt kubectl get ev
+expect_fixture "kubectl get event bare singular list alias" kubectl_get_events.txt kubectl get event
+expect_fixture "kubectl get events bare plural list form" kubectl_get_events.txt \
     kubectl get events
+expect_fixture "kubectl get deploy bare shorthand list alias" kubectl_get_deploy.txt kubectl get deploy
+expect_fixture "kubectl get deployment bare singular list alias" kubectl_get_deploy.txt \
+    kubectl get deployment
+expect_fixture "kubectl get deployments bare plural list form" kubectl_get_deploy.txt \
+    kubectl get deployments
 expect_fixture "kubectl get deployment NAME" kubectl_get_deploy.txt \
     kubectl get deployment demo
 expect_fixture "kubectl get deployments/NAME selector" kubectl_get_deploy.txt \
@@ -484,10 +503,6 @@ expect_reject "kubectl get svc with --watch is rejected" \
     'unsupported invocation' kubectl get svc demo --watch
 expect_reject "kubectl TYPE/NAME plus a separate name is rejected" \
     'unsupported invocation' kubectl get pod/demo-aaaa-bbbb extra
-expect_reject "kubectl get configmap without a name is rejected" \
-    'unsupported invocation' kubectl get configmap
-expect_reject "kubectl get deploy without a name is rejected" \
-    'unsupported invocation' kubectl get deploy
 expect_reject "kubectl named events are outside the mock surface" \
     'unsupported invocation' kubectl get events demo
 expect_reject "kubectl apply is not implemented" 'unsupported invocation' \
@@ -557,6 +572,8 @@ for command in $MOCK_COMMANDS; do
     expect_help "$command --help works without fixtures" '--help' "$command" --help
 done
 expect_help "kubectl help has Usage/Aliases/Options styling" 'Aliases:' kubectl --help
+expect_help "kubectl help documents bare ConfigMap lists" 'kubectl get configmaps' kubectl --help
+expect_help "kubectl help documents bare Deployment lists" 'kubectl get deployments' kubectl --help
 expect_help_without "kubectl help omits unsupported watch/apply forms" 'Options:' '--watch' \
     kubectl --help
 expect_help_without "kubectl help does not advertise apply" 'Usage:' 'kubectl apply' \
@@ -579,6 +596,10 @@ expect_help "curl help uses curl-style Usage/Options" 'Usage: curl -v URL' curl 
 expect_help_without "curl help omits unsupported silent mode" 'Options:' '  -s ' curl -h
 expect_help "coreutils-style help shows the exact supported form" 'Usage: ps aux' ps --help
 expect_help "df --help is available without fixtures" 'Usage: df -h' df --help
+expect_help "df --help describes -h as human-readable" '-h, --human-readable' df --help
+expect_help "df --help names only the long help flag" \
+    '--help                display this help and exit' df --help
+expect_help_without "df --help does not claim -h displays help" 'Options:' '-h, --help' df --help
 expect_help "df accepts a help request alongside its operational -h flag" 'Usage: df -h' df ignored -h
 expect_help "-h anywhere wins for non-df commands" 'Usage:' kubectl get -h
 expect_help "--help anywhere wins over invalid command syntax" 'SYSTEMCTL(1)' systemctl status --help demo

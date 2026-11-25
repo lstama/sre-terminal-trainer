@@ -78,6 +78,16 @@ included), with a real 8/8 solve under Podman.
   20 trainee checks. Answers, fixtures and hashes are byte-identical to the base.
   Details: `.agent/reports/T46-mock-improvements.md`.
 
+- T48 (`feat/mock-not-found-help`): fixed both T47 Low defects. Every existing
+  kubectl resource alias now supports a bare list form, including ConfigMaps and
+  Deployments, while NAME/TYPE-NAME validation is unchanged. `df --help` now
+  documents `-h, --human-readable` and reserves `--help` for help; `df -h`
+  dispatch is unchanged. Host smoke passes 111 verifier and 2,315 troubleshoot
+  assertions plus 38 real-fixture checks. Docker passed 46 real-SSH trainee
+  assertions including a full two-stage solve and record save; Podman passed
+  boot, a bare-list check and `verify check`. Details:
+  `.agent/reports/T48-mock-fixes.md`.
+
 ## Fixes landed in T05
 
 - `top-talker`: the answer is now provably the busiest client — one IP at 1500–1900
