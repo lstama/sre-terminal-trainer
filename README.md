@@ -59,7 +59,7 @@ make up PROFILE=troubleshoot PICK=disk-full,container-crash
 make ssh
 ```
 
-The briefs, hints, checks, flags, `verify` commands, timing records and `make down` / `make best` work exactly as above — only the drills change. Full notes: [docs/troubleshooting.md](docs/troubleshooting.md).
+The briefs, hints, checks, flags, `verify` commands, timing records and `make down` / `make best` work exactly as above — only the drills change. Mocked commands accept the documented kubectl, systemd, Docker and Podman shorthands, report realistic not-found errors for names outside the seeded scenario, and provide mock-specific `-h` / `--help` output. (`df -h` remains its normal human-readable data form; use `df --help` for help.) Full notes: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Make targets
 

@@ -338,12 +338,20 @@ Orchestration detail, not something a trainee needs to act on.
   and labelled journal, enforcement/AVC, memory, container-log, status, DNS,
   ping, nc and Kubernetes describe/log reports stay intact. Every selected stage
   therefore keeps its own clues regardless of `PICK` order.
+- **Names are compiled into the mock.** At build time the generator writes
+  `valid_names.inc`, a C table of the selected templates' real unit, pod,
+  ConfigMap, Service, Deployment and container names. It is included only while
+  compiling `sremock` and is never copied into the runtime image as data.
 - **Selection is a small explicit parser, not a shell.** `journalctl -u UNIT -n
-  100 --no-pager` accepts those three flags in any order; `journalctl -xe` is
-  its own form. `kubectl` distinguishes `get pods`, `get svc [NAME]`,
-  `get endpoints [NAME]`, `get events`, `get configmap NAME`, `get deploy NAME`,
-  `describe pod NAME` and `logs POD`.
-  `docker`/`podman` distinguish `ps -a`, `logs` and `inspect`. The general
+  100 --no-pager` accepts `-u` / `--unit` / `--unit=`, `-n` / `--lines` /
+  `--lines=`, and `--no-pager` in any order; `-xe`, `-x -e` and `-ex` are
+  equivalent. `kubectl` resource types are case-insensitive and accept
+  singular, plural and short forms (`po`, `cm`, `ep`, `ev`, `svc`, `deploy`),
+  including `TYPE/NAME` selectors. Its common `-n` / `--namespace`, `-o` /
+  `--output` and `-A` / `--all-namespaces` flags select the same frozen fixture.
+  `systemctl status UNIT` accepts UNIT with or without `.service`.
+  `docker`/`podman` accept `ps -a` / `ps --all`, `container ps|ls|list -a`,
+  `logs`, `inspect`, `container logs` and `container inspect`. The general
   triage commands have one fixture each, selected by their documented form:
   `ps aux`, `ss -tlnp`, `df -h`, `free -m`, `top`, `du -sh DIR`, `nginx -t`,
   `getenforce`, `ausearch -m avc`, `curl -v URL`, `curl -I URL`, `nc -zv HOST
@@ -352,6 +360,17 @@ Orchestration detail, not something a trainee needs to act on.
 - **The fixture name is a compile-time constant.** Arguments never become part
   of a path, so no argument can traverse out of the fixture root or select
   another file.
+- **Not-found behavior follows the command family.** A miss prints
+  `Error from server (NotFound): <plural> "<name>" not found` for kubectl,
+  `Error: No such container: <name>` for Docker/Podman, or
+  `Unit <name>.service could not be found.` for systemctl, all on stderr.
+  Kubectl/container misses exit 1; systemctl exits 4. A wrong `journalctl -u`
+  unit prints `-- No entries --` and exits 0.
+- **Help is mock-specific and fixture-free.** `COMMAND -h` or `COMMAND --help`
+  prints only the forms that command implements, styled after its real tool;
+  `sremock --help` lists the dispatched names. Help works from any argument
+  position and never reads a fixture. The one deliberate exception is `df -h`,
+  which remains the drill's human-readable data flag; `df --help` shows help.
 - **Unsupported invocations are honest failures.** Anything outside the forms
   above exits nonzero with `sremock: unsupported invocation: <command>` on
   stderr and no stdout. A missing or unreadable fixture exits nonzero with
@@ -440,9 +459,10 @@ A stage is solved when `verify stage` prints its flag — not when the service
   Nothing restarts, logs do not grow, ports do not open or close. Re-running a
   command prints exactly the same bytes.
 - **Narrow command surface.** Only the invocations described above are
-  implemented. Anything else — `systemctl restart`, `kubectl apply`,
-  `docker run`, `ss -tulpn` — fails on purpose. A mock that guesses would teach
-  the wrong reflex.
+  implemented, including the documented aliases. Anything else —
+  `systemctl restart`, `kubectl apply`, `docker run`, `ss -tulpn` — fails on
+  purpose. Use `COMMAND --help` to see the exact mock-supported surface. A mock
+  that guesses would teach the wrong reflex.
 - **No real systemd, kubelet, API server, web server, SELinux enforcement or
   container runtime.** The image does not install them; `nginx`, `docker` and
   `podman` are mocks too. The SELinux drill teaches fixture interpretation, not

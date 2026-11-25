@@ -33,6 +33,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/sre-troubleshoot-smoke.XXXXXX")
 BIN=${1:-$WORK/sremock}
 FIX=$WORK/fixtures
 BIN_DIR=$WORK/bin
+INCLUDE_DIR=$WORK/include
 BUILD_LOG=$WORK/build.log
 SEED=${SRE_SMOKE_SEED:-20261124}
 
@@ -53,13 +54,36 @@ MOCK_COMMANDS='systemctl journalctl ps ss curl df free top du nginx getenforce a
 
 # ---------------------------------------------------------------- build
 printf '== build ==\n'
+mkdir -p "$INCLUDE_DIR"
+cat >"$INCLUDE_DIR/valid_names.inc" <<'EOF'
+/* Fixed host-smoke names; generated real-name tables are tested in part 2. */
+static const ValidName valid_names[] = {
+    {"unit", "demo.service"},
+    {"pod", "demo-aaaa-bbbb"},
+    {"cm", "demo-config"},
+    {"svc", "demo-service"},
+    {"deploy", "demo"},
+    {"container", "demo"},
+    {NULL, NULL},
+};
+#define VALID_NAME_COUNT (sizeof(valid_names) / sizeof(valid_names[0]) - 1)
+EOF
 if [ "${SRE_SMOKE_SKIP_BUILD:-0}" = "1" ] && [ -x "$BIN" ]; then
     ok "using prebuilt binary at $BIN (SRE_SMOKE_SKIP_BUILD=1)"
-elif gcc -O2 -static -Wall -Wextra -o "$BIN" "$REPO_DIR/src/sremock.c" >"$BUILD_LOG" 2>&1; then
-    ok "static build of src/sremock.c"
+elif gcc -O2 -static -Wall -Wextra -Werror -DSREMOCK_VALID_NAMES=1 \
+        -I"$INCLUDE_DIR" -o "$BIN" "$REPO_DIR/src/sremock.c" >"$BUILD_LOG" 2>&1; then
+    ok "static build of src/sremock.c with a compiled name table"
 else
     bad "static build failed"
     sed 's/^/        | /' "$BUILD_LOG"
+    exit 1
+fi
+if gcc -O2 -static -Wall -Wextra -Werror -o "$WORK/sremock-empty" \
+        "$REPO_DIR/src/sremock.c" >"$WORK/empty-build.log" 2>&1; then
+    ok "standalone build uses the empty-table fallback"
+else
+    bad "standalone empty-table build failed"
+    sed 's/^/        | /' "$WORK/empty-build.log"
     exit 1
 fi
 if [ -s "$BUILD_LOG" ]; then
@@ -68,7 +92,8 @@ if [ -s "$BUILD_LOG" ]; then
 fi
 
 # ---------------------------------------------------------------- harness
-mkdir -p "$FIX" "$BIN_DIR"
+mkdir -p "$FIX" "$BIN_DIR" "$WORK/empty-bin"
+ln -s "$WORK/sremock-empty" "$WORK/empty-bin/systemctl"
 for command in $MOCK_COMMANDS; do
     ln -s "$BIN" "$BIN_DIR/$command"
 done
@@ -106,6 +131,82 @@ expect_reject() {
         ok "$er_desc (rc=$er_rc)"
     else
         bad "$er_desc (rc=$er_rc, need stderr '$er_needle' and empty stdout)"
+        note "stdout:"; sed 's/^/        | /' "$WORK/out"
+        note "stderr:"; sed 's/^/        | /' "$WORK/err"
+    fi
+}
+
+# expect_error <desc> <expected-rc> <exact-stderr> <cmd...>
+# A nonexistent fixture root proves name validation happens before fixture I/O.
+expect_error() {
+    ee_desc=$1
+    ee_rc=$2
+    ee_stderr=$3
+    shift 3
+    printf '%s\n' "$ee_stderr" >"$WORK/expected-err"
+    env SREMOCK_ROOT="$WORK/no-fixtures" "$@" >"$WORK/out" 2>"$WORK/err"
+    ee_actual=$?
+    if [ "$ee_actual" -eq "$ee_rc" ] && cmp -s "$WORK/err" "$WORK/expected-err" \
+            && [ ! -s "$WORK/out" ]; then
+        ok "$ee_desc (rc=$ee_actual, exact stderr)"
+    else
+        bad "$ee_desc (rc=$ee_actual, expected rc=$ee_rc and exact stderr)"
+        note "stdout:"; sed 's/^/        | /' "$WORK/out"
+        note "stderr:"; sed 's/^/        | /' "$WORK/err"
+    fi
+}
+
+# expect_stdout <desc> <expected-rc> <exact-stdout> <cmd...>
+expect_stdout() {
+    es_desc=$1
+    es_rc=$2
+    es_stdout=$3
+    shift 3
+    printf '%s\n' "$es_stdout" >"$WORK/expected-out"
+    env SREMOCK_ROOT="$WORK/no-fixtures" "$@" >"$WORK/out" 2>"$WORK/err"
+    es_actual=$?
+    if [ "$es_actual" -eq "$es_rc" ] && cmp -s "$WORK/out" "$WORK/expected-out" \
+            && [ ! -s "$WORK/err" ]; then
+        ok "$es_desc (rc=$es_actual, exact stdout)"
+    else
+        bad "$es_desc (rc=$es_actual, expected rc=$es_rc and exact stdout)"
+        note "stdout:"; sed 's/^/        | /' "$WORK/out"
+        note "stderr:"; sed 's/^/        | /' "$WORK/err"
+    fi
+}
+
+# expect_help <desc> <marker> <cmd...>
+expect_help() {
+    eh_desc=$1
+    eh_marker=$2
+    shift 2
+    env SREMOCK_ROOT="$WORK/no-fixtures" "$@" >"$WORK/out" 2>"$WORK/err"
+    eh_rc=$?
+    if [ "$eh_rc" -eq 0 ] && [ -s "$WORK/out" ] \
+            && grep -F -- "$eh_marker" "$WORK/out" >/dev/null 2>&1 \
+            && [ ! -s "$WORK/err" ]; then
+        ok "$eh_desc (no fixture read)"
+    else
+        bad "$eh_desc (rc=$eh_rc, need marker '$eh_marker', empty stderr, no fixture read)"
+        note "stdout:"; sed 's/^/        | /' "$WORK/out"
+        note "stderr:"; sed 's/^/        | /' "$WORK/err"
+    fi
+}
+
+# expect_help_without <desc> <marker> <forbidden> <cmd...>
+expect_help_without() {
+    ehw_desc=$1
+    ehw_marker=$2
+    ehw_forbidden=$3
+    shift 3
+    env SREMOCK_ROOT="$WORK/no-fixtures" "$@" >"$WORK/out" 2>"$WORK/err"
+    ehw_rc=$?
+    if [ "$ehw_rc" -eq 0 ] && grep -F -- "$ehw_marker" "$WORK/out" >/dev/null 2>&1 \
+            && ! grep -F -- "$ehw_forbidden" "$WORK/out" >/dev/null 2>&1 \
+            && [ ! -s "$WORK/err" ]; then
+        ok "$ehw_desc"
+    else
+        bad "$ehw_desc (rc=$ehw_rc, forbidden '$ehw_forbidden' or missing '$ehw_marker')"
         note "stdout:"; sed 's/^/        | /' "$WORK/out"
         note "stderr:"; sed 's/^/        | /' "$WORK/err"
     fi
@@ -280,10 +381,18 @@ EOF
 
 # ---------------------------------------------------------------- dispatch
 printf '\n== systemctl ==\n'
-expect_fixture "systemctl status SERVICE -> systemctl_status.txt" systemctl_status.txt \
+expect_fixture "systemctl status UNIT.service -> systemctl_status.txt" systemctl_status.txt \
     systemctl status demo.service
+expect_fixture "systemctl unit suffix is optional" systemctl_status.txt \
+    systemctl status demo
 expect_fixture "absolute argv[0] also dispatches on the basename" systemctl_status.txt \
     "$BIN_DIR/systemctl" status demo.service
+expect_error "systemctl missing unit has real stderr and exit 4" 4 \
+    'Unit missing.service could not be found.' systemctl status missing
+expect_error "systemctl does not double the .service suffix" 4 \
+    'Unit missing.service could not be found.' systemctl status missing.service
+expect_error "standalone fallback table treats every unit as absent" 4 \
+    'Unit demo.service could not be found.' "$WORK/empty-bin/systemctl" status demo
 expect_reject "systemctl with no arguments is rejected" 'unsupported invocation' systemctl
 expect_reject "systemctl restart is not implemented" 'unsupported invocation' \
     systemctl restart demo.service
@@ -292,10 +401,18 @@ expect_reject "systemctl status without a unit is rejected" 'unsupported invocat
 
 printf '\n== journalctl ==\n'
 expect_fixture "journalctl -xe -> journalctl_xe.txt" journalctl_xe.txt journalctl -xe
+expect_fixture "journalctl -x -e is the same shorthand" journalctl_xe.txt journalctl -x -e
+expect_fixture "journalctl -ex is the same shorthand" journalctl_xe.txt journalctl -ex
 expect_fixture "journalctl -u UNIT -n 100 --no-pager -> journalctl_unit.txt" \
     journalctl_unit.txt journalctl -u demo.service -n 100 --no-pager
-expect_fixture "journalctl accepts those three flags in any order" journalctl_unit.txt \
+expect_fixture "journalctl accepts long option aliases" journalctl_unit.txt \
+    journalctl --unit=demo --lines=100 --no-pager
+expect_fixture "journalctl accepts long options with separate values" journalctl_unit.txt \
+    journalctl --unit demo.service --lines 100 --no-pager
+expect_fixture "journalctl accepts those flags in any order" journalctl_unit.txt \
     journalctl --no-pager -n 100 -u demo.service
+expect_stdout "journalctl unknown unit stays a successful empty journal" 0 '-- No entries --' \
+    journalctl --unit=missing.service --lines=100 --no-pager
 expect_reject "journalctl without a line count is rejected" 'unsupported invocation' \
     journalctl -u demo.service
 expect_reject "journalctl only implements -n 100" 'unsupported invocation' \
@@ -305,49 +422,105 @@ expect_reject "journalctl -u with a missing value is rejected" 'unsupported invo
 
 printf '\n== kubectl ==\n'
 expect_fixture "kubectl get pods -> kubectl_get_pods.txt" kubectl_get_pods.txt kubectl get pods
+expect_fixture "kubectl get po shorthand" kubectl_get_pods.txt kubectl get po
+expect_fixture "kubectl resource types are case-insensitive" kubectl_get_pods.txt kubectl get PoD
+expect_fixture "kubectl get pod NAME validates a real pod" kubectl_get_pods.txt \
+    kubectl get pod demo-aaaa-bbbb
+expect_fixture "kubectl TYPE/NAME selector" kubectl_get_pods.txt \
+    kubectl get pods/demo-aaaa-bbbb
+expect_fixture "kubectl get cm shorthand" kubectl_get_configmap.txt \
+    kubectl get cm demo-config
+expect_fixture "kubectl plural ConfigMaps TYPE/NAME selector" kubectl_get_configmap.txt \
+    kubectl get ConfigMaps/demo-config
 expect_fixture "kubectl get svc -> kubectl_get_svc.txt" kubectl_get_svc.txt kubectl get svc
-expect_fixture "kubectl get svc NAME -> kubectl_get_svc.txt" kubectl_get_svc.txt \
-    kubectl get svc demo-service
-expect_fixture "kubectl get endpoints -> kubectl_get_endpoints.txt" \
-    kubectl_get_endpoints.txt kubectl get endpoints
-expect_fixture "kubectl get endpoints NAME -> kubectl_get_endpoints.txt" \
-    kubectl_get_endpoints.txt kubectl get endpoints demo-service
+expect_fixture "kubectl get services NAME" kubectl_get_svc.txt \
+    kubectl get services demo-service
+expect_fixture "kubectl get service/NAME selector" kubectl_get_svc.txt \
+    kubectl get service/demo-service
+expect_fixture "kubectl get ep shorthand" kubectl_get_endpoints.txt kubectl get ep
+expect_fixture "kubectl get endpoints NAME" kubectl_get_endpoints.txt \
+    kubectl get endpoints demo-service
+expect_fixture "kubectl get endpoint/NAME selector" kubectl_get_endpoints.txt \
+    kubectl get endpoint/demo-service
+expect_fixture "kubectl get ev shorthand" kubectl_get_events.txt kubectl get ev
 expect_fixture "kubectl get events -> kubectl_get_events.txt" kubectl_get_events.txt \
     kubectl get events
-expect_fixture "kubectl get configmap NAME -> kubectl_get_configmap.txt" \
-    kubectl_get_configmap.txt kubectl get configmap demo-config
-expect_fixture "kubectl get deploy NAME -> kubectl_get_deploy.txt" kubectl_get_deploy.txt \
-    kubectl get deploy demo
-expect_fixture "kubectl describe pod NAME -> kubectl_describe_pod.txt" \
-    kubectl_describe_pod.txt kubectl describe pod demo-aaaa-bbbb
-expect_fixture "kubectl logs POD -> kubectl_logs.txt" kubectl_logs.txt kubectl logs demo-aaaa-bbbb
-expect_reject "kubectl get pods with an extra argument is rejected" \
-    'unsupported invocation' kubectl get pods --all-namespaces
-expect_reject "kubectl get svc with extra arguments is rejected" \
+expect_fixture "kubectl get deployment NAME" kubectl_get_deploy.txt \
+    kubectl get deployment demo
+expect_fixture "kubectl get deployments/NAME selector" kubectl_get_deploy.txt \
+    kubectl get deployments/demo
+expect_fixture "kubectl describe pod NAME" kubectl_describe_pod.txt \
+    kubectl describe pod demo-aaaa-bbbb
+expect_fixture "kubectl describe po TYPE/NAME" kubectl_describe_pod.txt \
+    kubectl describe po/demo-aaaa-bbbb
+expect_fixture "kubectl logs POD" kubectl_logs.txt kubectl logs demo-aaaa-bbbb
+expect_fixture "kubectl logs pod/POD" kubectl_logs.txt kubectl logs pod/demo-aaaa-bbbb
+expect_fixture "kubectl common short flags" kubectl_get_pods.txt \
+    kubectl get po -n demo -o wide
+expect_fixture "kubectl common long flags" kubectl_get_pods.txt \
+    kubectl get pods --namespace=demo --output=wide
+expect_fixture "kubectl all-namespaces short flag" kubectl_get_pods.txt \
+    kubectl get pods -A
+expect_fixture "kubectl all-namespaces long flag and global flag order" kubectl_get_pods.txt \
+    kubectl --all-namespaces get pods
+expect_error "kubectl missing pod uses canonical plural and exit 1" 1 \
+    'Error from server (NotFound): pods "missing" not found' kubectl get po missing
+expect_error "kubectl TYPE/NAME miss uses canonical plural" 1 \
+    'Error from server (NotFound): configmaps "missing" not found' kubectl get cm/missing
+expect_error "kubectl missing Service name" 1 \
+    'Error from server (NotFound): services "missing" not found' kubectl get svc missing
+expect_error "kubectl missing endpoint name" 1 \
+    'Error from server (NotFound): endpoints "missing" not found' kubectl get ep missing
+expect_error "kubectl missing deployment name" 1 \
+    'Error from server (NotFound): deployments "missing" not found' kubectl get deploy missing
+expect_error "kubectl describe miss reports pods" 1 \
+    'Error from server (NotFound): pods "missing" not found' kubectl describe pod missing
+expect_error "kubectl logs miss reports pods" 1 \
+    'Error from server (NotFound): pods "missing" not found' kubectl logs missing
+expect_error "traversal-shaped names are rejected before fixture I/O" 1 \
+    'Error from server (NotFound): configmaps "../../etc/passwd" not found' \
+    kubectl get configmap ../../etc/passwd
+expect_reject "kubectl get svc with --watch is rejected" \
     'unsupported invocation' kubectl get svc demo --watch
-expect_reject "kubectl get endpoints with extra arguments is rejected" \
-    'unsupported invocation' kubectl get endpoints demo --watch
+expect_reject "kubectl TYPE/NAME plus a separate name is rejected" \
+    'unsupported invocation' kubectl get pod/demo-aaaa-bbbb extra
 expect_reject "kubectl get configmap without a name is rejected" \
     'unsupported invocation' kubectl get configmap
+expect_reject "kubectl get deploy without a name is rejected" \
+    'unsupported invocation' kubectl get deploy
+expect_reject "kubectl named events are outside the mock surface" \
+    'unsupported invocation' kubectl get events demo
 expect_reject "kubectl apply is not implemented" 'unsupported invocation' \
     kubectl apply -f demo.yaml
 
-# The fixture name is a compile-time constant: an argument that looks like a
-# path can never escape the fixture root or select another file.
-expect_fixture "a traversal-shaped configmap name still selects the fixed fixture" \
-    kubectl_get_configmap.txt kubectl get configmap ../../etc/passwd
-
 printf '\n== docker and podman ==\n'
 expect_fixture "docker ps -a -> docker_ps_a.txt" docker_ps_a.txt docker ps -a
-expect_fixture "docker logs NAME -> docker_logs.txt" docker_logs.txt docker logs demo
-expect_fixture "docker inspect NAME -> docker_inspect.txt" docker_inspect.txt docker inspect demo
+expect_fixture "docker ps --all" docker_ps_a.txt docker ps --all
+expect_fixture "docker container ls -a alias" docker_ps_a.txt docker container ls -a
+expect_fixture "docker container list --all alias" docker_ps_a.txt docker container list --all
+expect_fixture "docker container ps -a alias" docker_ps_a.txt docker container ps -a
+expect_fixture "docker logs NAME" docker_logs.txt docker logs demo
+expect_fixture "docker container logs NAME alias" docker_logs.txt docker container logs demo
+expect_fixture "docker inspect NAME" docker_inspect.txt docker inspect demo
+expect_fixture "docker container inspect NAME alias" docker_inspect.txt docker container inspect demo
 expect_fixture "podman ps -a -> podman_ps_a.txt" podman_ps_a.txt podman ps -a
-expect_fixture "podman logs NAME -> podman_logs.txt" podman_logs.txt podman logs demo
-expect_fixture "podman inspect NAME -> podman_inspect.txt" podman_inspect.txt podman inspect demo
+expect_fixture "podman container ps --all alias" podman_ps_a.txt podman container ps --all
+expect_fixture "podman container ls -a alias" podman_ps_a.txt podman container ls -a
+expect_fixture "podman container list -a alias" podman_ps_a.txt podman container list -a
+expect_fixture "podman logs NAME" podman_logs.txt podman logs demo
+expect_fixture "podman container logs NAME alias" podman_logs.txt podman container logs demo
+expect_fixture "podman inspect NAME" podman_inspect.txt podman inspect demo
+expect_fixture "podman container inspect NAME alias" podman_inspect.txt podman container inspect demo
+expect_error "docker missing container has real stderr and exit 1" 1 \
+    'Error: No such container: missing' docker logs missing
+expect_error "podman missing container has real stderr and exit 1" 1 \
+    'Error: No such container: missing' podman container inspect missing
 expect_reject "docker ps without -a is rejected" 'unsupported invocation' docker ps
 expect_reject "docker run is not implemented" 'unsupported invocation' docker run demo
 expect_reject "podman ps without -a is rejected" 'unsupported invocation' podman ps
 expect_reject "podman run is not implemented" 'unsupported invocation' podman run demo
+expect_reject "container logs with extra operands is rejected" 'unsupported invocation' \
+    docker logs demo extra
 
 printf '\n== other mock commands ==\n'
 expect_fixture "ss -tlnp keeps CRLF and the missing final newline" ss_tlnp.txt ss -tlnp
@@ -368,7 +541,7 @@ expect_fixture "nc -zv HOST PORT -> nc_zv.txt" nc_zv.txt nc -zv example.test 808
 expect_reject "ss without -tlnp is rejected" 'unsupported invocation' ss -tulpn
 expect_reject "df without -h is rejected" 'unsupported invocation' df
 expect_reject "du without -sh is rejected" 'unsupported invocation' du -s /var/log/demo
-expect_reject "free without -m is rejected" 'unsupported invocation' free -h
+expect_reject "free with an unsupported flag is rejected" 'unsupported invocation' free -x
 expect_reject "top with arguments is rejected" 'unsupported invocation' top -b
 expect_reject "nginx without -t is rejected" 'unsupported invocation' nginx -s reload
 expect_reject "getenforce with arguments is rejected" 'unsupported invocation' getenforce -v
@@ -376,6 +549,41 @@ expect_reject "ausearch without -m avc is rejected" 'unsupported invocation' aus
 expect_reject "curl without a URL is rejected" 'unsupported invocation' curl -v
 expect_reject "curl -s is not implemented" 'unsupported invocation' curl -s http://example.test
 expect_reject "nc without -zv is rejected" 'unsupported invocation' nc -z example.test 8080
+
+printf '\n== help ==\n'
+expect_help "sremock --help lists the dispatcher commands" 'kubectl' "$BIN" --help
+expect_help "sremock -h is global help" 'systemctl' "$BIN" -h
+for command in $MOCK_COMMANDS; do
+    expect_help "$command --help works without fixtures" '--help' "$command" --help
+done
+expect_help "kubectl help has Usage/Aliases/Options styling" 'Aliases:' kubectl --help
+expect_help_without "kubectl help omits unsupported watch/apply forms" 'Options:' '--watch' \
+    kubectl --help
+expect_help_without "kubectl help does not advertise apply" 'Usage:' 'kubectl apply' \
+    kubectl -h
+expect_help "systemctl help uses man-page sections" 'SYSTEMCTL(1)' systemctl --help
+expect_help "systemctl help documents optional unit suffix" 'UNIT.service' systemctl -h
+expect_help_without "systemctl help omits unsupported verbs" 'SYNOPSIS' 'restart' \
+    systemctl --help
+expect_help "journalctl help uses man-page sections" 'JOURNALCTL(1)' journalctl --help
+expect_help "journalctl help documents long flag aliases" '--unit=UNIT' journalctl -h
+expect_help_without "journalctl help omits unsupported filters" 'OPTIONS' '--since' \
+    journalctl --help
+expect_help "docker help has Usage/Aliases/Description/Options styling" 'Description:' \
+    docker --help
+expect_help "docker help renders ps aliases from the alias table" 'container list' docker -h
+expect_help_without "docker help omits unsupported run forms" 'Aliases:' 'docker run' \
+    docker --help
+expect_help "podman help has container aliases" 'container ps' podman --help
+expect_help "curl help uses curl-style Usage/Options" 'Usage: curl -v URL' curl --help
+expect_help_without "curl help omits unsupported silent mode" 'Options:' '  -s ' curl -h
+expect_help "coreutils-style help shows the exact supported form" 'Usage: ps aux' ps --help
+expect_help "df --help is available without fixtures" 'Usage: df -h' df --help
+expect_help "df accepts a help request alongside its operational -h flag" 'Usage: df -h' df ignored -h
+expect_help "-h anywhere wins for non-df commands" 'Usage:' kubectl get -h
+expect_help "--help anywhere wins over invalid command syntax" 'SYSTEMCTL(1)' systemctl status --help demo
+expect_help "container help anywhere wins" 'Usage:' docker container --help ls
+expect_help "curl help anywhere wins" 'Usage:' curl -v --help
 
 printf '\n== failure paths ==\n'
 mkdir -p "$WORK/empty"
@@ -475,6 +683,53 @@ emit(not missing and not extra and len(present) == len(FIXTURES),
      "missing=%s extra=%s" % (missing, extra))
 emit(all("%%" not in fixture(name) for name in FIXTURES),
      "no fixture contains a literal double percent")
+
+# Build-time name validation table: only selected-template keys, stable order,
+# unique real names, and no copy in the runtime fixture/fs trees.
+NAME_KEYS = ["unit", "pod", "cm", "svc", "deploy", "container"]
+NAME_KEYS_BY_TEMPLATE = {
+    "svc-crashloop": {"unit"},
+    "k8s-crashloop": {"pod", "cm", "deploy"},
+    "disk-full": {"unit"},
+    "container-crash": {"container"},
+    "svc-selector": {"pod", "svc", "deploy"},
+    "resource-limits": {"pod", "deploy"},
+    "dependency-down": {"unit"},
+    "perm-denied": {"unit"},
+    "oom-kill": {"unit"},
+    "image-pull": {"container"},
+}
+with open(os.path.join(out, "valid_names.inc"), encoding="utf-8") as fh:
+    names_text = fh.read()
+name_rows = re.findall(r'^\s*\{"(unit|pod|cm|svc|deploy|container)", "([^"]+)"\},$',
+                       names_text, re.MULTILINE)
+expected_keys = set()
+for sid in (PICK or POOL):
+    expected_keys.update(NAME_KEYS_BY_TEMPLATE.get(sid, set()))
+actual_keys = {key for key, _name in name_rows}
+emit(actual_keys == expected_keys,
+     "valid_names.inc has exactly the selected templates' resource keys",
+     "expected=%s actual=%s" % (sorted(expected_keys), sorted(actual_keys)))
+expected_rows = sorted(name_rows, key=lambda row: (NAME_KEYS.index(row[0]), row[1]))
+emit(name_rows == expected_rows and len(name_rows) == len(set(name_rows)),
+     "valid_names.inc rows are unique and in canonical key/name order")
+all_fixtures = "\n".join(fixture(name) for name in FIXTURES)
+all_fs_paths = "\n".join(
+    os.path.join(dirpath, filename)
+    for dirpath, _dirnames, filenames in os.walk(os.path.join(out, "fs"))
+    for filename in filenames
+)
+missing_names = []
+for key, name in name_rows:
+    candidate = name[:-8] if key == "unit" and name.endswith(".service") else name
+    if name not in all_fixtures and candidate not in all_fs_paths:
+        missing_names.append((key, name))
+emit(not missing_names,
+     "every compiled valid name occurs in selected scenario fixtures or files",
+     repr(missing_names))
+emit("valid_names.inc" not in present
+     and not os.path.exists(os.path.join(out, "fs", "valid_names.inc")),
+     "valid_names.inc stays outside runtime fixture/fs data")
 
 with open(answers_path, encoding="utf-8") as fh:
     dump = json.load(fh)
@@ -1344,6 +1599,86 @@ PY
     run_generator_case "default sixteen-template troubleshoot generation" default 16
     run_generator_case "original two-template PICK" pilot-pick 2 \
         svc-crashloop,k8s-crashloop
+    run_generator_case "repeat generation for determinism" pilot-repeat 2 \
+        svc-crashloop,k8s-crashloop
+    if cmp -s "$WORK/gen-pilot-pick/valid_names.inc" \
+            "$WORK/gen-pilot-repeat/valid_names.inc"; then
+        ok "valid_names.inc is deterministic for the same seed and PICK"
+    else
+        bad "valid_names.inc differs across identical generation runs"
+        diff -u "$WORK/gen-pilot-pick/valid_names.inc" \
+            "$WORK/gen-pilot-repeat/valid_names.inc" | sed 's/^/        | /'
+    fi
+    if diff -r "$WORK/gen-pilot-pick/fixtures" "$WORK/gen-pilot-repeat/fixtures" \
+            >"$WORK/pilot-repeat-fixture-diff.log" 2>&1; then
+        ok "repeat generation keeps all 32 fixture bytes identical"
+    else
+        bad "repeat generation changed fixture bytes"
+        sed 's/^/        | /' "$WORK/pilot-repeat-fixture-diff.log"
+    fi
+
+    # Compile against the generator's real include and exercise names that do
+    # not exist in the fixed host-smoke table above.
+    PILOT_BIN_DIR=$WORK/pilot-bin
+    mkdir -p "$PILOT_BIN_DIR"
+    if gcc -O2 -static -Wall -Wextra -Werror -DSREMOCK_VALID_NAMES=1 \
+            -I"$WORK/gen-pilot-pick" -o "$WORK/sremock-pilot" \
+            "$REPO_DIR/src/sremock.c" >"$WORK/pilot-build.log" 2>&1; then
+        ok "sremock compiles against generated valid_names.inc"
+        for command in $MOCK_COMMANDS; do
+            ln -s "$WORK/sremock-pilot" "$PILOT_BIN_DIR/$command"
+        done
+        pilot_unit=$(awk -F'"' '$2 == "unit" { print $4; exit }' \
+            "$WORK/gen-pilot-pick/valid_names.inc")
+        pilot_pod=$(awk -F'"' '$2 == "pod" { print $4; exit }' \
+            "$WORK/gen-pilot-pick/valid_names.inc")
+        pilot_cm=$(awk -F'"' '$2 == "cm" { print $4; exit }' \
+            "$WORK/gen-pilot-pick/valid_names.inc")
+        pilot_deploy=$(awk -F'"' '$2 == "deploy" { print $4; exit }' \
+            "$WORK/gen-pilot-pick/valid_names.inc")
+        expect_fixture "generated unit name is accepted with its suffix" \
+            systemctl_status.txt "$PILOT_BIN_DIR/systemctl" status "$pilot_unit"
+        expect_fixture "generated unit name is accepted without its suffix" \
+            systemctl_status.txt "$PILOT_BIN_DIR/systemctl" status "${pilot_unit%.service}"
+        expect_fixture "generated pod TYPE/NAME is accepted" kubectl_get_pods.txt \
+            "$PILOT_BIN_DIR/kubectl" get "po/$pilot_pod"
+        expect_fixture "generated configmap shorthand is accepted" kubectl_get_configmap.txt \
+            "$PILOT_BIN_DIR/kubectl" get cm "$pilot_cm"
+        expect_fixture "generated deployment shorthand is accepted" kubectl_get_deploy.txt \
+            "$PILOT_BIN_DIR/kubectl" get deploy "$pilot_deploy"
+        expect_fixture "generated pod is accepted by describe" kubectl_describe_pod.txt \
+            "$PILOT_BIN_DIR/kubectl" describe pods/"$pilot_pod"
+        expect_fixture "generated pod is accepted by logs" kubectl_logs.txt \
+            "$PILOT_BIN_DIR/kubectl" logs po/"$pilot_pod"
+        expect_error "an invented pod name is rejected by the generated table" 1 \
+            'Error from server (NotFound): pods "definitely-missing" not found' \
+            "$PILOT_BIN_DIR/kubectl" get po definitely-missing
+        other_seed=$((SEED + 1))
+        if python3 "$GEN" --seed "$other_seed" --set 2 --profile troubleshoot \
+                --pick svc-crashloop,k8s-crashloop --out "$WORK/gen-pilot-other" \
+                >"$WORK/gen-pilot-other.log" 2>&1; then
+            other_pod=$(awk -F'"' '$2 == "pod" { print $4; exit }' \
+                "$WORK/gen-pilot-other/valid_names.inc")
+            expect_error "a real pod name from another seed is rejected" 1 \
+                "Error from server (NotFound): pods \"$other_pod\" not found" \
+                "$PILOT_BIN_DIR/kubectl" get po "$other_pod"
+            if cmp -s "$WORK/gen-pilot-pick/valid_names.inc" \
+                    "$WORK/gen-pilot-other/valid_names.inc"; then
+                bad "different seeds unexpectedly produced the same valid-name table"
+            else
+                ok "different seeds produce different compiled resource names"
+            fi
+        else
+            bad "other-seed generation failed"
+            sed 's/^/        | /' "$WORK/gen-pilot-other.log"
+        fi
+        expect_error "keys absent from selected templates stay absent" 1 \
+            'Error: No such container: demo' "$PILOT_BIN_DIR/docker" logs demo
+    else
+        bad "sremock failed to compile against generated valid_names.inc"
+        sed 's/^/        | /' "$WORK/pilot-build.log"
+    fi
+
     # A reversed, non-pool order and a deliberately different SET prove PICK
     # controls both the exact subset order and the effective stage count.
     run_generator_case "new two-template PICK with reversed order" new-pick 1 \
@@ -1400,6 +1735,12 @@ PY
     else
         bad "wave-eight fixture bytes differ between forward and reversed PICK"
         sed 's/^/        | /' "$WORK/wave8-fixture-diff.log"
+    fi
+    if cmp -s "$WORK/gen-wave8-pick/valid_names.inc" \
+            "$WORK/gen-wave8-reversed/valid_names.inc"; then
+        ok "valid_names.inc is independent of PICK order"
+    else
+        bad "valid_names.inc differs between forward and reversed PICK"
     fi
     run_generator_case "mixed wave-eight shared-evidence PICK" wave8-mixed 1 \
         blocked-port,perm-denied,selinux-avc,nginx-config,dns-mismatch,dependency-down,port-conflict,svc-crashloop

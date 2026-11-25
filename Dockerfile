@@ -40,6 +40,7 @@ COPY src/ ./src/
 #   /generated/manifest       SEED / STAGES / STAGE lines
 #   /generated/stages/NN/     instruction, hint, checks.tsv, flag.sha256
 #   /generated/final.sha256   sha256 of the final flag
+#   /generated/valid_names.inc builder-only C table for sremock name validation
 #   /generated/fixtures/      flat trainee-readable troubleshoot fixtures
 # answers.json is test-only plaintext and is deleted before this stage ends,
 # so no answer ever reaches the runtime image.
@@ -55,7 +56,8 @@ RUN extra=""; \
         --dump-answers /generated/answers.json \
         ${extra} \
  && gcc -O2 -static -o /generated/verify src/sha256.c src/util.c src/verify.c \
- && gcc -O2 -static -o /generated/sremock src/sremock.c \
+ && gcc -O2 -static -DSREMOCK_VALID_NAMES=1 -I/generated \
+        -o /generated/sremock src/sremock.c \
  && rm -f /generated/answers.json
 
 

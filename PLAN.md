@@ -36,8 +36,9 @@ egress); the drills are all local files.
 
 1. Build args `SEED` and `SET` drive `python3 generator/generate.py --seed SEED --set N
    --out /generated --dump-answers /generated/answers.json`.
-2. The builder produces `/generated/{fs,manifest,stages/NN/*,final.sha256}`, compiles
-   `gcc -O2 -static -o /generated/verify src/*.c`, and deletes `answers.json`.
+2. The builder produces `/generated/{fs,manifest,stages/NN/*,final.sha256,valid_names.inc}`,
+   compiles `verify` and the fixture dispatcher `sremock` (the latter includes the
+   build-time name table), and deletes `answers.json`.
 3. The runtime stage copies `fs/` onto `/` (challenge files live at their real absolute
    paths, modes preserved), installs the verifier as `/usr/local/bin/verify` (4755
    root:root), and the root-only corpus at `/var/lib/sre-trainer/` (0700 dirs / 0600
@@ -68,7 +69,8 @@ egress); the drills are all local files.
 - **Pin the Alpine patch** (`3.24.4`, current at scaffold time) so rebuilds do not drift
   musl/OpenSSH/coreutils underneath the drills.
 - **Generate at build time, answer key never shipped**: `answers.json` is deleted in the
-  builder; the image carries hashes only.
+  builder; the image carries hashes only. Seed-specific mock resource names live in a
+  generated C include compiled into `sremock`, never in a runtime data file.
 - **Challenge files are installed at their absolute paths**, not under a sandbox root:
   the generator emits paths like `/home/trainee/<drill>` and `/var/log/sre/<log>`.
   Modes are preserved (a perm drill inspects them); only `/home/trainee` changes owner.
@@ -110,6 +112,7 @@ egress); the drills are all local files.
 | T35 | Add `svc-selector` and `resource-limits`; expand troubleshoot pool to twelve | done |
 | T37 | Add `tls-expiry` and `dependency-down`; expand troubleshoot pool to fourteen | done |
 | T39 | Add `blocked-port` and `perm-denied`; expand troubleshoot pool to sixteen | done |
+| T46 | Mock aliases, seed-validated not-found errors and fixture-free command help | done |
 
 ## Open questions
 
