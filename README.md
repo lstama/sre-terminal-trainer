@@ -50,16 +50,41 @@ make best        # your local runs, fastest first
 
 ## Troubleshoot profile
 
-A second profile (`PROFILE=troubleshoot`) reuses this same harness for sixteen diagnostic templates: service and Kubernetes crash loops (`svc-crashloop`, `k8s-crashloop`), disk-space and container-crash triage (`disk-full`, `container-crash`), nginx configuration/ownership checks (`nginx-config`), DNS/endpoint mismatch triage (`dns-mismatch`), SELinux access-denial investigation (`selinux-avc`), process/port collision triage (`port-conflict`), memory-exhaustion/OOM investigation (`oom-kill`), container-image pull failures (`image-pull`), Kubernetes Service-selector mismatch triage (`svc-selector`), Kubernetes OOM/resource-limit investigation (`resource-limits`), TLS certificate-expiry investigation (`tls-expiry`), downstream-dependency failure triage (`dependency-down`), filtered-port/unreachable-service triage (`blocked-port`), and file permission/ownership triage (`perm-denied`). Alongside `systemctl`, `journalctl`, `ss`, `ps`, `kubectl`, `df`, `du`, `free`, `top`, `docker` and `podman`, they exercise `nginx -t`, `ls -l`, `stat`, `getenforce`, `ausearch`, `curl`, `dig`, `nslookup`, `ping` and `nc`. The diagnostic commands are mocked: one small compiled binary is symlinked under each command name and prints a fixture, while `ls -l` and `stat` read real file metadata. There is no privileged container, live service stack, web server or container runtime behind them.
+The troubleshoot profile (`PROFILE=troubleshoot`) turns the same trainer into sixteen diagnostic drills. Each presents a realistic broken system, giving you a safe place to practise reading evidence, making a careful repair and checking the result.
+
+### Start here
 
 ```sh
-make up PROFILE=troubleshoot                         # all sixteen, seeded order
-# Or choose an exact subset and order:
-make up PROFILE=troubleshoot PICK=disk-full,container-crash
+# On the host
+make up PROFILE=troubleshoot
 make ssh
+
+# Inside the SSH session
+verify next
+
+# After verify finish, log out; then on the host
+make down PROFILE=troubleshoot
 ```
 
-The briefs, hints, checks, flags, `verify` commands, timing records and `make down` / `make best` work exactly as above — only the drills change. Mocked commands accept the documented kubectl, systemd, Docker and Podman shorthands, report realistic not-found errors for names outside the seeded scenario, and provide mock-specific `-h` / `--help` output. (`df -h` remains its normal human-readable data form; use `df --help` for help.) Full notes: [docs/troubleshooting.md](docs/troubleshooting.md).
+Use the password printed by `make up` to log in. Docker and Podman are both supported (`ENGINE=docker` / `ENGINE=podman`), and SSH is published on `127.0.0.1` only. Keep `PROFILE=troubleshoot` on later `make` commands, and repeat an explicit `ENGINE` or `PORT` if you set one.
+
+By default, all sixteen templates run (`SET=16`). Use `SET=1` through `SET=15` for a seeded subset, or a comma-separated `PICK=` list for an exact ordered subset. The usual `verify check`, `verify stage`, `verify unlock` and `verify finish` flow, hints, timing and records are unchanged.
+
+### What you practise
+
+- **Services, processes and ports:** inspect unit state, journals, sockets, process ownership and port conflicts.
+- **Logs, storage and resources:** investigate crash loops, full disks, OOM kills and Kubernetes resource limits.
+- **Configuration, permissions and SELinux:** correlate syntax errors with real file metadata and rule out access-control failures.
+- **Network, DNS and TLS:** trace endpoint mismatches, unreachable ports and certificate expiry.
+- **Containers and Kubernetes:** read Docker/Podman failures, pod status, logs, events, selectors and deployment manifests.
+
+### Good to know
+
+- **One mock, many commands.** One compiled binary backs the mocked diagnostic commands, which read from 32 fixtures generated for the selected seed; `ls -l` and `stat` still read real file metadata. The drills need no privileged container, live systemd, web server, container runtime or Kubernetes cluster.
+- **Help is built in.** Documented Kubernetes, systemd, Docker and Podman shorthands work. Try `COMMAND --help` (or `COMMAND -h`) to see the supported forms; `df -h` prints data, so use `df --help` for help.
+- **No hidden answer file.** Wrong resource names return realistic not-found errors. The valid names are compiled into the mock binary, not stored in a file you can look up.
+
+See [docs/troubleshooting.md](docs/troubleshooting.md) for the full template list, command reference and verify flow.
 
 ## Make targets
 
