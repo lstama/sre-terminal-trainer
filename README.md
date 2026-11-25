@@ -1,33 +1,37 @@
 # sre-terminal-trainer
 
-A disposable Docker **or Podman** container with randomized SRE terminal drills (log triage, config fixes, permission audits, editors, pipes, tmux) and a `verify` helper that checks answers, hands out flag fragments and records your time — all local, nothing sent anywhere.
+A disposable Docker **or Podman** container with randomized SRE practice in two modes, plus a `verify` helper that checks answers, hands out flag fragments and records your time — all local, nothing sent anywhere.
 
-![A full sample attempt: make up, make ssh, verify next, a grep on the deploy log, three verified answers, the stage flag and the next brief](docs/demo/sample-run.gif)
+*Demo for **Terminal mode**: a full sample attempt with `make up`, `make ssh`, `verify next`, a grep on the deploy log, three verified answers, the stage flag and the next brief.*
 
-[Watch the full video (MP4)](docs/demo/sample-run.mp4)
+![Demo for Terminal mode: a full sample attempt with three verified answers and the next stage brief](docs/demo/sample-run.gif)
 
-## What it is
+[Watch the full Terminal mode demo video (MP4)](docs/demo/sample-run.mp4)
 
-- **Randomized challenges** — a fresh, seeded set of drills each build. A given `SEED` replays the same set; `make new` picks a new one.
-- **Docker or Podman** — engine auto-detected (`podman` if on `PATH`, else `docker`); force either with `ENGINE=podman` / `ENGINE=docker`.
-- **Real toolbox practice** — `bash`, `tmux`, `nano`, `less`, `tree`, `grep`, `gawk`, `find`. No `sudo`, no compilers, no root for the trainee.
-- **Timing records** — `verify` tracks elapsed time; `make best` lists your local runs, fastest first.
+## Two practice modes
 
-> **Spoiler policy.** This README never gives answers or seed-specific facts. The answer key is generated in the container *build* stage and deleted before the runtime image is assembled — the image holds hashes only.
-
-## Requirements
-
-- Docker (Linux/macOS) or Podman (Linux, rootless OK; v4+), GNU `make` and `python3` on the host.
-- A free local port (default `2222`).
-
-## Quick start
+Both modes use the same local container, SSH session and `verify` loop. Terminal mode is the default; `MODE=terminal` also selects it explicitly.
 
 ```sh
-make up          # build image, start container, print seed / port / user / password
-make ssh         # log in as the trainee (type the printed password)
+make up                      # Terminal mode: eight stages by default
+make up MODE=incident        # Incident mode: sixteen diagnostic stages
 ```
 
-Inside the session:
+- **Terminal mode** — practise log triage, search and navigation with real files and a Linux toolbox; see the [spoiler-free walkthrough](docs/walkthrough.md).
+- **Terminal mode** — repair configs and permissions, edit efficiently, and combine pipes and tmux; see the [drill reference](docs/walkthrough.md#3-what-the-drills-train).
+- **Incident mode** — inspect mocked service, log, storage and network evidence, then make and verify a careful repair; see the [Incident mode guide](docs/incident-mode.md).
+- **Incident mode** — work through container, Kubernetes, DNS, TLS and access-control scenarios without a live stack; see the [template and command reference](docs/incident-mode.md#the-sixteen-templates).
+
+## Shared quick start
+
+Build and start your chosen mode, then connect:
+
+```sh
+make up                      # or: make up MODE=incident
+make ssh                     # type the password printed by make up
+```
+
+Inside either mode:
 
 ```sh
 verify next                       # current stage brief
@@ -46,35 +50,36 @@ make down        # copy completion records to state/records.jsonl, remove the co
 make best        # your local runs, fastest first
 ```
 
-`make new` tears down and starts a fresh challenge set. Run `make help` for the full target list.
+For Incident mode, repeat `MODE=incident` on later host commands, for example `make down MODE=incident`, `make status MODE=incident` or `make new MODE=incident`. Match `ENGINE` and `PORT` too if you overrode them. `make new` starts a fresh seeded set; `make help` lists every target.
 
-## Troubleshoot profile
+## What it is
 
-A second profile (`PROFILE=troubleshoot`) reuses this same harness for sixteen diagnostic templates: service and Kubernetes crash loops (`svc-crashloop`, `k8s-crashloop`), disk-space and container-crash triage (`disk-full`, `container-crash`), nginx configuration/ownership checks (`nginx-config`), DNS/endpoint mismatch triage (`dns-mismatch`), SELinux access-denial investigation (`selinux-avc`), process/port collision triage (`port-conflict`), memory-exhaustion/OOM investigation (`oom-kill`), container-image pull failures (`image-pull`), Kubernetes Service-selector mismatch triage (`svc-selector`), Kubernetes OOM/resource-limit investigation (`resource-limits`), TLS certificate-expiry investigation (`tls-expiry`), downstream-dependency failure triage (`dependency-down`), filtered-port/unreachable-service triage (`blocked-port`), and file permission/ownership triage (`perm-denied`). Alongside `systemctl`, `journalctl`, `ss`, `ps`, `kubectl`, `df`, `du`, `free`, `top`, `docker` and `podman`, they exercise `nginx -t`, `ls -l`, `stat`, `getenforce`, `ausearch`, `curl`, `dig`, `nslookup`, `ping` and `nc`. The diagnostic commands are mocked: one small compiled binary is symlinked under each command name and prints a fixture, while `ls -l` and `stat` read real file metadata. There is no privileged container, live service stack, web server or container runtime behind them.
+- **Randomized challenges** — a fresh, seeded set of drills each build. A given `SEED` replays the same set; `make new` picks a new one.
+- **Docker or Podman** — engine auto-detected (`podman` if on `PATH`, else `docker`); force either with `ENGINE=podman` / `ENGINE=docker`.
+- **Real toolbox practice** — `bash`, `tmux`, `nano`, `less`, `tree`, `grep`, `gawk`, `find`. No `sudo`, no compilers, no root for the trainee.
+- **Timing records** — `verify` tracks elapsed time; `make best` lists your local runs, fastest first.
 
-```sh
-make up PROFILE=troubleshoot                         # all sixteen, seeded order
-# Or choose an exact subset and order:
-make up PROFILE=troubleshoot PICK=disk-full,container-crash
-make ssh
-```
+> **Spoiler policy.** This README never gives answers or seed-specific facts. The answer key is generated in the container *build* stage and deleted before the runtime image is assembled — the image holds hashes only.
 
-The briefs, hints, checks, flags, `verify` commands, timing records and `make down` / `make best` work exactly as above — only the drills change. Full notes: [docs/troubleshooting.md](docs/troubleshooting.md).
+## Requirements
+
+- Docker (Linux/macOS) or Podman (Linux, rootless OK; v4+), GNU `make` and `python3` on the host.
+- A free local port (default `2222`).
 
 ## Make targets
 
 | Target | What it does |
 |---|---|
-| `make up [SEED=N] [SET=N] [PORT=N]` | Build the image, start the container, print seed/port/credentials and the stage list. |
+| `make up [MODE=terminal\|incident] [SEED=N] [SET=N] [PORT=N]` | Build the image, start the container, print seed/port/credentials and the stage list. |
 | `make ssh` | SSH to `127.0.0.1:$PORT` with host-key checking disabled (throwaway container). |
 | `make status` | Container state, credentials path, seed, port and saved records. |
 | `make down` | Copy completion records to `state/`, then stop and remove the container. |
 | `make new` | `down`, then `up` with a fresh seed. |
 | `make best` | Local records, fastest first. |
-| `make test` | Run both terminal and troubleshoot smoke suites, then one up/down cycle; assert the working tree is clean. |
+| `make test` | Run the Terminal mode and Incident mode smoke suites, then one up/down cycle; assert the working tree is clean. |
 | `make clean` | Remove the container, image, `.instance/` and `state/`. |
 
-Variables: `ENGINE`, `IMAGE`, `CONTAINER`, `PORT`, `SET` (stages per run; default 8 for terminal and 16 for troubleshoot), `SEED`, `SSH_USER`, `INSTANCE` (credentials dir, default `.instance`) and `STATE` (records dir, default `state/`). Every target honours `ENGINE`, including the recursive `make` calls in `new` and `test`. The demo recorder uses `INSTANCE`/`STATE` to keep its own throwaway files.
+Variables: `MODE` (`terminal` or `incident`, default `terminal`), `ENGINE`, `IMAGE`, `CONTAINER`, `PORT`, `SET` (stages per run; default 8 for Terminal mode and 16 for Incident mode), `PICK` (comma-separated Incident mode template ids), `SEED`, `SSH_USER`, `INSTANCE` (credentials dir, default `.instance`) and `STATE` (records dir, default `state/`). Every target honours `ENGINE` and `MODE`, including the recursive `make` calls in `new` and `test`. The demo recorder uses `INSTANCE`/`STATE` to keep its own throwaway files.
 
 ## How it works
 
@@ -90,19 +95,20 @@ Variables: `ENGINE`, `IMAGE`, `CONTAINER`, `PORT`, `SET` (stages per run; defaul
 - Credentials are randomized per instance in `.instance/creds` (mode 0600). Don't reuse them elsewhere.
 - Only sources, config and docs are tracked. `.instance/`, `state/` and the demo's `.demo-instance/`/`.demo-state/` are gitignored (see `.gitignore`, `.dockerignore`).
 
-## Troubleshooting
+## Common issues
 
 - **Port in use** — `make up PORT=2223`.
 - **Docker permission denied** — add your user to the `docker` group.
 - **Podman permission denied** — rootless Podman needs `subuid`/`subgid` ranges for your user; check `podman unshare id`, then add `<user>:100000:65536` to `/etc/subuid` and `/etc/subgid` and run `podman system migrate` once.
 - **Podman `unauthorized: incorrect username or password` on pull** — a stale Docker Hub login in `~/.docker/config.json` (Docker silently falls back to anonymous, Podman does not); run `podman login docker.io`, remove that entry, or set `REGISTRY_AUTH_FILE` to an empty auth file.
-- **`no container named …` after switching engines** — `make down`/`status`/`clean` only see the engine they talk to; add `ENGINE=docker` or `ENGINE=podman` to match the engine that started the container.
+- **`no container named …` after switching modes or engines** — each mode has its own container name; pass the matching `MODE` and `ENGINE` to `make down`, `make status` and `make clean`.
 - **Container exits immediately** — `make up` prints the last log lines; the entrypoint refuses to start without `SSH_PASSWORD`.
-- **Want the pristine challenge set back after editing** — `make down && make up` rebuilds it (same seed unless you pass a new one).
+- **Want the pristine challenge set back after editing** — `make down && make up` rebuilds it (same mode and seed unless you change them).
 
 ## More
 
-- Spoiler-free guided walkthrough of every drill: [docs/walkthrough.md](docs/walkthrough.md).
+- Terminal mode: [spoiler-free guided walkthrough](docs/walkthrough.md).
+- Incident mode: [template list, command reference and verify flow](docs/incident-mode.md).
 - Re-record the demo (VHS, tapes, fixed seed, GIF/MP4): [docs/demo/README.md](docs/demo/README.md).
 
 ## License

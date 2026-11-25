@@ -34,10 +34,16 @@ egress); the drills are all local files.
 
 ### Data flow
 
-1. Build args `SEED` and `SET` drive `python3 generator/generate.py --seed SEED --set N
-   --out /generated --dump-answers /generated/answers.json`.
-2. The builder produces `/generated/{fs,manifest,stages/NN/*,final.sha256}`, compiles
-   `gcc -O2 -static -o /generated/verify src/*.c`, and deletes `answers.json`.
+1. `MODE=terminal|incident` is the public selector. The Makefile maps Incident mode to the
+   existing internal `PROFILE=troubleshoot` build arg, which the Dockerfile forwards to the
+   generator as `--profile troubleshoot`. Direct generator calls can use canonical
+   `--mode terminal|incident`; both spellings normalize to the same internal profile.
+   Build args `SEED` and `SET` drive
+   `python3 generator/generate.py --seed SEED --set N --out /generated
+   --dump-answers /generated/answers.json`.
+2. The builder produces `/generated/{fs,manifest,stages/NN/*,final.sha256,valid_names.inc}`,
+   compiles `verify` and the fixture dispatcher `sremock` (the latter includes the
+   build-time name table), and deletes `answers.json`.
 3. The runtime stage copies `fs/` onto `/` (challenge files live at their real absolute
    paths, modes preserved), installs the verifier as `/usr/local/bin/verify` (4755
    root:root), and the root-only corpus at `/var/lib/sre-trainer/` (0700 dirs / 0600
@@ -50,8 +56,9 @@ egress); the drills are all local files.
 
 ### Interfaces (do not change casually)
 
-- Generator CLI: `--seed INT --set N --out DIR --dump-answers FILE`; `--self-test SEEDS`
-  regenerates a full set per seed and re-derives every answer from the artefacts on disk.
+- Generator CLI: `--seed INT --set N --out DIR --dump-answers FILE`
+  `[--mode terminal|incident]`; `--self-test SEEDS` regenerates a full set per seed and
+  re-derives every answer from the artefacts on disk.
 - Generator output: `fs/` mirrors container-absolute paths; `manifest` is line based
   (`SEED n`, `STAGES n`, `STAGE <id>` repeated); `stages/NN/{instruction,hint,checks.tsv,
   flag.sha256}`; `final.sha256`.
@@ -68,7 +75,8 @@ egress); the drills are all local files.
 - **Pin the Alpine patch** (`3.24.4`, current at scaffold time) so rebuilds do not drift
   musl/OpenSSH/coreutils underneath the drills.
 - **Generate at build time, answer key never shipped**: `answers.json` is deleted in the
-  builder; the image carries hashes only.
+  builder; the image carries hashes only. Seed-specific mock resource names live in a
+  generated C include compiled into `sremock`, never in a runtime data file.
 - **Challenge files are installed at their absolute paths**, not under a sandbox root:
   the generator emits paths like `/home/trainee/<drill>` and `/var/log/sre/<log>`.
   Modes are preserved (a perm drill inspects them); only `/home/trainee` changes owner.
@@ -84,15 +92,16 @@ egress); the drills are all local files.
   was needed; the loopback publish and the 4755 verifier behave identically (rootless
   Podman maps container-root into the user namespace, where setuid still works).
 - **Host credentials are generated per instance** by `up` (mode 0600, never committed).
-- **The `troubleshoot` profile provides the second set of challenges.** The `PROFILE=troubleshoot` profile
-  reuses the same harness for sixteen diagnostic templates (`svc-crashloop`,
-  `k8s-crashloop`, `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`,
-  `selinux-avc`, `port-conflict`, `oom-kill`, `image-pull`, `svc-selector`,
-  `resource-limits`, `tls-expiry`, `dependency-down`, `blocked-port`,
-  `perm-denied`). Their service commands are mocked; `ls -l`/`stat` read real
-  ownership metadata on reference assets. Shared socket, curl, journal,
-  enforcement/AVC, resource, container and Kubernetes fixtures compose evidence
-  when multiple selected stages need them. Details: `docs/troubleshooting.md`.
+- **Terminal mode and Incident mode are peer practice modes.** `MODE=incident` reuses the
+  same harness for sixteen diagnostic templates (`svc-crashloop`, `k8s-crashloop`,
+  `disk-full`, `container-crash`, `nginx-config`, `dns-mismatch`, `selinux-avc`,
+  `port-conflict`, `oom-kill`, `image-pull`, `svc-selector`, `resource-limits`,
+  `tls-expiry`, `dependency-down`, `blocked-port`, `perm-denied`). Their service commands
+  are mocked; `ls -l`/`stat` read real ownership metadata on reference assets. Shared
+  socket, curl, journal, enforcement/AVC, resource, container and Kubernetes fixtures
+  compose evidence when multiple selected stages need them. The old `PROFILE=troubleshoot`
+  and `--profile troubleshoot` spellings remain hidden compatibility aliases. Details:
+  `docs/incident-mode.md`.
 
 ## Task split
 
@@ -105,11 +114,14 @@ egress); the drills are all local files.
 | T05 | Fix review findings, dynamic end-to-end verification, walkthrough | done |
 | T06 | Read-only static recheck of the fixed harness | done |
 | T07 | Docker/Podman engine abstraction, Podman install, both-engine verification | done |
-| T30 | Add `selinux-avc` and `port-conflict`; expand troubleshoot pool to eight | done |
-| T33 | Add `oom-kill` and `image-pull`; expand troubleshoot pool to ten | done |
-| T35 | Add `svc-selector` and `resource-limits`; expand troubleshoot pool to twelve | done |
-| T37 | Add `tls-expiry` and `dependency-down`; expand troubleshoot pool to fourteen | done |
-| T39 | Add `blocked-port` and `perm-denied`; expand troubleshoot pool to sixteen | done |
+| T30 | Add `selinux-avc` and `port-conflict`; expand Incident mode pool to eight | done |
+| T33 | Add `oom-kill` and `image-pull`; expand Incident mode pool to ten | done |
+| T35 | Add `svc-selector` and `resource-limits`; expand Incident mode pool to twelve | done |
+| T37 | Add `tls-expiry` and `dependency-down`; expand Incident mode pool to fourteen | done |
+| T39 | Add `blocked-port` and `perm-denied`; expand Incident mode pool to sixteen | done |
+| T46 | Mock aliases, seed-validated not-found errors and fixture-free command help | done |
+| T48 | Bare kubectl list aliases and accurate df help text | done |
+| T53 | Terminal mode / Incident mode naming, hidden aliases and README restructure | done |
 
 ## Open questions
 

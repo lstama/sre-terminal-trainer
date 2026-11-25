@@ -1,23 +1,23 @@
-# Troubleshooting challenges: the troubleshoot profile
+# Incident mode
 
-The trainer's second profile is a pool of sixteen diagnostic drills whose terminal
-commands are answered from fixtures instead of a live machine. It exists to
-practise the read-then-repair loop — inspect the evidence, decide on one change,
-make it, prove it — without shipping a privileged container, a systemd host or a
+Incident mode is a pool of sixteen diagnostic drills whose terminal commands are
+answered from fixtures instead of a live machine. It exists to practise the
+read-then-repair loop — inspect the evidence, decide on one change, make it,
+prove it — without shipping a privileged container, a systemd host or a
 Kubernetes cluster.
 
 Everything outside the drills is unchanged: the same sshd/entrypoint image
 layout, the same setuid `verify`, the same `/var/lib/sre-trainer/state/`
-progress and the same flag, timing and record flow. If you have used the default
-profile, the interaction is identical; only the stages differ.
+progress and the same flag, timing and record flow. If you have used Terminal
+mode, the interaction is identical; only the stages differ.
 
-- Profile flag: `PROFILE=troubleshoot`
+- Mode selector: `MODE=incident`
 - Templates: `svc-crashloop`, `k8s-crashloop`, `disk-full`, `container-crash`,
   `nginx-config`, `dns-mismatch`, `selinux-avc`, `port-conflict`, `oom-kill`,
   `image-pull`, `svc-selector`, `resource-limits`, `tls-expiry`, `dependency-down`,
   `blocked-port`, `perm-denied`
 - Image / container: `sre-terminal-trainer-troubleshoot:local` / `sre-trainer-troubleshoot`
-  (separate from the default names, so both profiles can run side by side)
+  (separate from the Terminal mode names, so both modes can run side by side)
 
 ## The sixteen templates
 
@@ -56,8 +56,8 @@ ConfigMap:
 | `kubectl describe pod <pod>` | Container state, last termination, which config key the environment requests |
 | `kubectl logs <pod>` | The container's own failure reason |
 | `kubectl get events` | Back-off and configuration-related events with a reason code |
-| `kubectl get configmap <name>` | The keys the ConfigMap actually defines |
-| `kubectl get deploy <name>` | Deployment readiness (context only) |
+| `kubectl get configmap [name]` | The keys the ConfigMap actually defines |
+| `kubectl get deploy [name]` | Deployment readiness (context only) |
 
 One check is a hash check over the pod name and crash reason; one is a hash
 check over the config key the container reports as missing; one is a file check
@@ -213,7 +213,7 @@ then correlate the endpoint controller, events, pod description and deployment:
 | `kubectl get events` | `EndpointsNotFound` and the matching mismatch fragment |
 | `kubectl get pods` | Randomized pod names and labels, including non-matching candidates |
 | `kubectl describe pod <pod>` | The affected pod's labels and Service-match context |
-| `kubectl get deploy <name>` | Deployment readiness and workload identity |
+| `kubectl get deploy [name]` | Deployment readiness and workload identity |
 | `curl -v http://<cluster-ip>:<port>/` | Refused connection to the Service address |
 
 Two hash checks use the Service name and selector-mismatch fragment. The file
@@ -233,7 +233,7 @@ before editing the workload:
 | `kubectl describe pod <pod>` | Last termination `OOMKilled`, `BestEffort` QoS, no limits, OOM fragment and memory-policy clue |
 | `kubectl get events` | OOM event, incident fragment and reviewed memory limit |
 | `kubectl logs <pod>` | Container-side corroboration of the OOM and recommended limit |
-| `kubectl get deploy <name>` | Deployment readiness and workload identity |
+| `kubectl get deploy [name]` | Deployment readiness and workload identity |
 
 Two hash checks use the pod name and OOM incident fragment. The file check
 repairs a deployment under `/home/trainee/k8s/` by inserting only the missing
@@ -325,7 +325,7 @@ Orchestration detail, not something a trainee needs to act on.
   `systemctl`, `journalctl`, `ps`, `ss`, `curl`, `df`, `free`, `top`, `du`,
   `nginx`, `getenforce`, `ausearch`, `dig`, `nslookup`, `ping`, `nc`, `docker`,
   `podman`, `kubectl`.
-- **PATH ordering is part of the contract.** The troubleshoot image sets
+- **PATH ordering is part of the contract.** The Incident mode image sets
   `PATH="/usr/local/bin:…"` so the mocks shadow both BusyBox applets in `/bin`
   and any package tool in `/usr/bin`.
 - **Fixtures are flat files.** The generator writes 32 named text files; the
@@ -338,12 +338,23 @@ Orchestration detail, not something a trainee needs to act on.
   and labelled journal, enforcement/AVC, memory, container-log, status, DNS,
   ping, nc and Kubernetes describe/log reports stay intact. Every selected stage
   therefore keeps its own clues regardless of `PICK` order.
+- **Names are compiled into the mock.** At build time the generator writes
+  `valid_names.inc`, a C table of the selected templates' real unit, pod,
+  ConfigMap, Service, Deployment and container names. It is included only while
+  compiling `sremock` and is never copied into the runtime image as data.
 - **Selection is a small explicit parser, not a shell.** `journalctl -u UNIT -n
-  100 --no-pager` accepts those three flags in any order; `journalctl -xe` is
-  its own form. `kubectl` distinguishes `get pods`, `get svc [NAME]`,
-  `get endpoints [NAME]`, `get events`, `get configmap NAME`, `get deploy NAME`,
-  `describe pod NAME` and `logs POD`.
-  `docker`/`podman` distinguish `ps -a`, `logs` and `inspect`. The general
+  100 --no-pager` accepts `-u` / `--unit` / `--unit=`, `-n` / `--lines` /
+  `--lines=`, and `--no-pager` in any order; `-xe`, `-x -e` and `-ex` are
+  equivalent. `kubectl` resource types are case-insensitive and accept
+  singular, plural and short forms (`po`, `cm`, `ep`, `ev`, `svc`, `deploy`).
+  Bare resource forms list the fixture without a name (for example,
+  `kubectl get deploy`, `kubectl get deployment`, `kubectl get po` and
+  `kubectl get cm`); supported `NAME` and `TYPE/NAME` forms validate against the
+  compiled names. Common `-n` / `--namespace`, `-o` / `--output` and `-A` /
+  `--all-namespaces` flags select the same frozen fixture.
+  `systemctl status UNIT` accepts UNIT with or without `.service`.
+  `docker`/`podman` accept `ps -a` / `ps --all`, `container ps|ls|list -a`,
+  `logs`, `inspect`, `container logs` and `container inspect`. The general
   triage commands have one fixture each, selected by their documented form:
   `ps aux`, `ss -tlnp`, `df -h`, `free -m`, `top`, `du -sh DIR`, `nginx -t`,
   `getenforce`, `ausearch -m avc`, `curl -v URL`, `curl -I URL`, `nc -zv HOST
@@ -352,6 +363,17 @@ Orchestration detail, not something a trainee needs to act on.
 - **The fixture name is a compile-time constant.** Arguments never become part
   of a path, so no argument can traverse out of the fixture root or select
   another file.
+- **Not-found behavior follows the command family.** A miss prints
+  `Error from server (NotFound): <plural> "<name>" not found` for kubectl,
+  `Error: No such container: <name>` for Docker/Podman, or
+  `Unit <name>.service could not be found.` for systemctl, all on stderr.
+  Kubectl/container misses exit 1; systemctl exits 4. A wrong `journalctl -u`
+  unit prints `-- No entries --` and exits 0.
+- **Help is mock-specific and fixture-free.** `COMMAND -h` or `COMMAND --help`
+  prints only the forms that command implements, styled after its real tool;
+  `sremock --help` lists the dispatched names. Help works from any argument
+  position and never reads a fixture. The one deliberate exception is `df -h`,
+  which remains the drill's human-readable data flag; `df --help` shows help.
 - **Unsupported invocations are honest failures.** Anything outside the forms
   above exits nonzero with `sremock: unsupported invocation: <command>` on
   stderr and no stdout. A missing or unreadable fixture exits nonzero with
@@ -363,37 +385,37 @@ Orchestration detail, not something a trainee needs to act on.
 ## Running it
 
 ```sh
-make up PROFILE=troubleshoot                         # seeded selection of all sixteen
+make up MODE=incident                         # seeded selection of all sixteen
 # Or choose an exact, ordered subset:
-make up PROFILE=troubleshoot PICK=disk-full,container-crash
+make up MODE=incident PICK=disk-full,container-crash
 make ssh
 ```
 
 - `PICK` names any non-empty subset and its exact order for this build
   (`--pick` in the generator). With `PICK` set, `SET` does not decide the count;
   the picked list does.
-- With no `PICK`, this profile defaults to `SET=16`, selecting all sixteen
+- With no `PICK`, Incident mode defaults to `SET=16`, selecting all sixteen
   templates in seeded order. `SET=1` through `15` selects that many from the
-  pool; values outside 1–16 are rejected before the build. The terminal profile
-  keeps its default `SET=8`.
-- `SEED=` and `PORT=` work as in the default profile. A new seed rebuilds the
-  corpus; the generator layer is keyed on the build arguments, so an unchanged
-  `SEED` and `PICK` reuse the cached layer.
-- `make up` prints the seed, port, credentials and the stage list. For this
-  profile it also echoes `profile=troubleshoot pick=…`.
+  pool; values outside 1–16 are rejected before the build. Terminal mode keeps
+  its default `SET=8`.
+- `SEED=` and `PORT=` work as in Terminal mode. A new seed rebuilds the corpus;
+  the generator layer is keyed on the build arguments, so an unchanged `SEED`
+  and `PICK` reuse the cached layer.
+- `make up` prints the seed, port, credentials and the stage list. For Incident
+  mode it also echoes `mode=incident pick=…`.
 
 ## Replay with a seed
 
 The generated corpus is deterministic for a given `SEED` **and** `PICK`.
 
 ```sh
-make down
-make up PROFILE=troubleshoot PICK=disk-full,container-crash SEED=1234
+make down MODE=incident
+make up MODE=incident PICK=disk-full,container-crash SEED=1234
 ```
 
 - `make up` records the seed in `.instance/seed` and reuses it until you pass a
   new `SEED=` or run `make new`.
-- Replay needs both halves. The same seed under a different `PROFILE` or `PICK`
+- Replay needs both halves. The same seed under a different `MODE` or `PICK`
   is a different challenge set — that is expected, not a lost seed.
 - `make status` prints the stored seed and the container's stage list, which is
   the quickest way to confirm what you are replaying.
@@ -413,9 +435,9 @@ verify hint 9      # show everything for the stage
 verify status      # stage, elapsed time, checks done
 ```
 
-## Knowing when the profile is solved
+## Knowing when the mode is solved
 
-The flow is the default profile's flow, per stage:
+The flow is the same as Terminal mode, per stage:
 
 1. Read the brief (`verify next`). It lists every check id and its submit form.
 2. Submit hash checks with `verify check <check-id> <answer>`. Answers are the
@@ -429,7 +451,8 @@ The flow is the default profile's flow, per stage:
 4. Checks may be submitted in any order. `verify stage` prints the stage flag
    once every check in the stage passes; `verify unlock <flag>` advances.
 5. After the last stage is unlocked, `verify finish <final-flag>` records the
-   run. Then `make down` (save the record) and `make best` (compare runs).
+   run. Then `make down MODE=incident` (save the record) and `make best` (compare
+   runs).
 
 A stage is solved when `verify stage` prints its flag — not when the service
 "looks fixed", because nothing is actually restarted.
@@ -440,9 +463,10 @@ A stage is solved when `verify stage` prints its flag — not when the service
   Nothing restarts, logs do not grow, ports do not open or close. Re-running a
   command prints exactly the same bytes.
 - **Narrow command surface.** Only the invocations described above are
-  implemented. Anything else — `systemctl restart`, `kubectl apply`,
-  `docker run`, `ss -tulpn` — fails on purpose. A mock that guesses would teach
-  the wrong reflex.
+  implemented, including the documented aliases. Anything else —
+  `systemctl restart`, `kubectl apply`, `docker run`, `ss -tulpn` — fails on
+  purpose. Use `COMMAND --help` to see the exact mock-supported surface. A mock
+  that guesses would teach the wrong reflex.
 - **No real systemd, kubelet, API server, web server, SELinux enforcement or
   container runtime.** The image does not install them; `nginx`, `docker` and
   `podman` are mocks too. The SELinux drill teaches fixture interpretation, not
@@ -453,9 +477,9 @@ A stage is solved when `verify stage` prints its flag — not when the service
   scenario and re-run the service to confirm it; the file check compares the
   bytes to the expected corrected file. That is why the briefs describe the
   exact end state.
-- **Throwaway container.** Your edits live inside the container. `make down`
-  removes it, so unrecorded work is gone; the completion record is the only
-  thing that persists.
+- **Throwaway container.** Your edits live inside the container.
+  `make down MODE=incident` removes it, so unrecorded work is gone; the
+  completion record is the only thing that persists.
 - **Fixed pool.** There are sixteen templates. Fixtures for commands the picked
   stages do not use are still shipped, but they print a neutral placeholder
   instead of scenario data.
