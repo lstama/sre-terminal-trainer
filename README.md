@@ -66,7 +66,12 @@ verify next
 make down PROFILE=troubleshoot
 ```
 
-Use the password printed by `make up` to log in. Docker and Podman are both supported (`ENGINE=docker` / `ENGINE=podman`), and SSH is published on `127.0.0.1` only. Keep `PROFILE=troubleshoot` on later `make` commands, and repeat an explicit `ENGINE` or `PORT` if you set one.
+Use the password printed by `make up` to log in. Docker and Podman both work; choose one with
+`ENGINE=docker` or `ENGINE=podman`. SSH is published on `127.0.0.1` only.
+
+Add `PROFILE=troubleshoot` to later `make down`, `make status` and `make new` commands so they
+target the troubleshoot container. If you set `ENGINE` or `PORT` on `make up`, pass the same
+values again.
 
 By default, all sixteen templates run (`SET=16`). Use `SET=1` through `SET=15` for a seeded subset, or a comma-separated `PICK=` list for an exact ordered subset. The usual `verify check`, `verify stage`, `verify unlock` and `verify finish` flow, hints, timing and records are unchanged.
 
@@ -80,9 +85,14 @@ By default, all sixteen templates run (`SET=16`). Use `SET=1` through `SET=15` f
 
 ### Good to know
 
-- **One mock, many commands.** One compiled binary backs the mocked diagnostic commands, which read from 32 fixtures generated for the selected seed; `ls -l` and `stat` still read real file metadata. The drills need no privileged container, live systemd, web server, container runtime or Kubernetes cluster.
+- **One mock, many commands.** One compiled binary answers the mocked diagnostic commands from
+  32 fixtures generated for the selected seed; `ls -l` and `stat` still read real file metadata.
+- **No live stack needed.** No privileged container, systemd, web server, container runtime or
+  Kubernetes cluster runs behind the drills.
 - **Help is built in.** Documented Kubernetes, systemd, Docker and Podman shorthands work. Try `COMMAND --help` (or `COMMAND -h`) to see the supported forms; `df -h` prints data, so use `df --help` for help.
-- **No hidden answer file.** Wrong resource names return realistic not-found errors. The valid names are compiled into the mock binary, not stored in a file you can look up.
+- **No hidden answer file.** Unknown Kubernetes resources, container names and service units
+  return realistic not-found errors. The valid names are compiled into the mock binary, not
+  stored in a file you can look up.
 
 See [docs/troubleshooting.md](docs/troubleshooting.md) for the full template list, command reference and verify flow.
 
