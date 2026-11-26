@@ -18,3 +18,5 @@ tests/out/
 *.swp
 .demo-instance/
 .demo-state/
+.demo-incident-instance/
+.demo-incident-state/

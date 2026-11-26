@@ -2,11 +2,19 @@
 
 A disposable Docker **or Podman** container with randomized SRE practice in two modes, plus a `verify` helper that checks answers, hands out flag fragments and records your time — all local, nothing sent anywhere.
 
+Both demos are real, unscripted sessions against throwaway containers.
+
 *Demo for **Terminal mode**: a full sample attempt with `make up`, `make ssh`, `verify next`, a grep on the deploy log, three verified answers, the stage flag and the next brief.*
 
-![Demo for Terminal mode: a full sample attempt with three verified answers and the next stage brief](docs/demo/sample-run.gif)
+![Terminal mode demo: a full sample attempt with three verified answers and the next stage brief](docs/demo/sample-run.gif)
 
-[Watch the full Terminal mode demo video (MP4)](docs/demo/sample-run.mp4)
+[Watch the full Terminal mode video (MP4)](docs/demo/sample-run.mp4)
+
+*Demo for **Incident mode**: a full `k8s-crashloop` attempt with `make up`, `make ssh`, `verify next`, two `kubectl` diagnostics, the manifest repair, three verified answers and the stage flag.*
+
+![Incident mode demo: a k8s-crashloop attempt with two kubectl diagnostics, three verified answers, the stage flag and the follow-up instruction](docs/demo/incident-run.gif)
+
+[Watch the full Incident mode video (MP4)](docs/demo/incident-run.mp4)
 
 ## Two practice modes
 
@@ -17,10 +25,10 @@ make up                      # Terminal mode: eight stages by default
 make up MODE=incident        # Incident mode: sixteen diagnostic stages
 ```
 
-- **Terminal mode** — practise log triage, search and navigation with real files and a Linux toolbox; see the [spoiler-free walkthrough](docs/walkthrough.md).
-- **Terminal mode** — repair configs and permissions, edit efficiently, and combine pipes and tmux; see the [drill reference](docs/walkthrough.md#3-what-the-drills-train).
-- **Incident mode** — inspect mocked service, log, storage and network evidence, then make and verify a careful repair; see the [Incident mode guide](docs/incident-mode.md).
-- **Incident mode** — work through container, Kubernetes, DNS, TLS and access-control scenarios without a live stack; see the [template and command reference](docs/incident-mode.md#the-sixteen-templates).
+- **Terminal mode** — practise log triage, search and navigation with real files and a Linux toolbox, then repair configs and permissions, edit efficiently, and combine pipes and tmux. See the [spoiler-free walkthrough](docs/walkthrough.md) and the [drill reference](docs/walkthrough.md#3-what-the-drills-train).
+- **Incident mode** — inspect mocked service, log, storage and network evidence, then make and verify a careful repair across container, Kubernetes, DNS, TLS and access-control scenarios without a live stack. See the [Incident mode guide](docs/incident-mode.md) and the [template and command reference](docs/incident-mode.md#the-sixteen-templates).
+
+Start with Terminal mode, then move on to Incident mode.
 
 ## Shared quick start
 
@@ -112,7 +120,7 @@ Variables: `MODE` (`terminal` or `incident`, default `terminal`), `ENGINE`, `IMA
 
 - Terminal mode: [spoiler-free guided walkthrough](docs/walkthrough.md).
 - Incident mode: [template list, command reference and verify flow](docs/incident-mode.md).
-- Re-record the demo (VHS, tapes, fixed seed, GIF/MP4): [docs/demo/README.md](docs/demo/README.md).
+- Re-record either demo (VHS, tapes, fixed seed, GIF/MP4): [docs/demo/README.md](docs/demo/README.md).
 
 ## License
 

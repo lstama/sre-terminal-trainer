@@ -57,7 +57,7 @@ RANDOM_PASSWORD = python3 -c 'import secrets,string; a=string.ascii_letters+stri
 RANDOM_SEED     = python3 -c 'import secrets; print(secrets.randbelow(899999)+100000)'
 PORT_FREE       = python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); sys.exit(0 if s.connect_ex(("127.0.0.1", $(PORT))) else 1)'
 
-.PHONY: help up down ssh new status best test clean demo demo-mp4 demo-gif
+.PHONY: help up down ssh new status best test clean demo demo-mp4 demo-gif demo-incident
 
 help:
 	@printf '%s\n' \
@@ -76,6 +76,8 @@ help:
 	  '  make demo               re-record docs/demo/sample-run.mp4 and .gif (needs vhs)' \
 	  '  make demo-mp4           re-record only the MP4 deliverable' \
 	  '  make demo-gif           re-record only the GIF deliverable' \
+	  '  make demo-incident      re-record docs/demo/incident-run.mp4 and .gif' \
+	  '                          (Incident mode, k8s-crashloop)' \
 	  '  make clean              remove container, image, .instance/ and state/' \
 	  '' \
 	  'Variables: MODE (terminal|incident, default terminal),' \
@@ -262,3 +264,9 @@ demo-mp4:
 
 demo-gif:
 	@sh demo/render.sh gif
+
+# The Incident mode recording drives MODE=incident PICK=k8s-crashloop through a
+# separate throwaway instance, so it cannot disturb `make demo` or your own
+# .instance/ and state/.  Both deliverables come from one tape run.
+demo-incident:
+	@sh demo/render-incident.sh both
