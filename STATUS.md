@@ -97,6 +97,13 @@ included), with a real 8/8 solve under Podman.
   to the baseline. Isolated Docker boots reported sixteen stages and clean
   mode-matched shutdowns for both selectors. Details:
   `.agent/reports/T53-modes-rename.md`.
+- T56 (`feat/mode-aware-records`): completion records now carry `mode` and
+  `hints_used` (root-only `state/hints`, counted only for a displayed hint page).
+  The generator emits a `MODE` manifest header, `verify status` reports the mode,
+  and `make best` / `tools/best.py` filter per mode (`?` for pre-change records).
+  Host smoke passes 111 verifier, 2,316 Incident mode and 38 records assertions;
+  both modes were solved in Docker. Details:
+  `.agent/reports/T56-mode-aware-records.md`.
 
 ## Fixes landed in T05
 

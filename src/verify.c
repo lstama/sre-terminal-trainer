@@ -1233,7 +1233,9 @@ static int cmd_hint(int argc, char **argv)
         v = strtol(argv[2], &end, 10);
         if (errno != 0 || end == argv[2] || *end != '\0' || v < 1)
             return fail("hint number must be a positive integer");
-        want = (int)v;
+        /* Clamp instead of letting the int cast wrap negative: an oversized
+         * request is handled by the "show all" path below, not as a page. */
+        want = (v > INT_MAX) ? INT_MAX : (int)v;
     }
 
     /* Hints come from stages/NN/hint (free text lines) first, then any
@@ -1276,13 +1278,15 @@ static int cmd_hint(int argc, char **argv)
         return 0;
     }
     if (want > nhints) {
+        /* Out-of-range request: warn and fall back to every available hint.
+         * No specific page was requested, so it is not counted as shown. */
         printf("Stage %d has %d hint(s); showing all of them.\n", cur, nhints);
         want = nhints;
-    }
-
-    /* A page was actually displayed: count it for this attempt's record. */
-    if (bump_hints_used() != 0)
+    } else if (bump_hints_used() != 0) {
+        /* The requested hint page was displayed: count it for this attempt's
+         * record. Invalid/out-of-range requests skip this entirely. */
         return 1;
+    }
 
     for (i = 0; i < want; i++)
         printf("Hint %d/%d: %s\n", i + 1, nhints, hints[i]);

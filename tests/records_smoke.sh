@@ -120,7 +120,7 @@ expect_rc "incident: status parses MODE line" 0 run1 status
 expect_contains "incident: status reports mode" "Mode:  incident"
 expect_contains "incident: status starts at zero hints" "Hints: 0 page(s) shown"
 
-expect_rc "first hint page" 0 run1 hint
+expect_rc "first hint page (hint 1)" 0 run1 hint 1
 if [ "$(tr -d '[:space:]' <"$ROOT1/state/hints" 2>/dev/null)" = "1" ]; then
     ok "state/hints incremented to 1"
 else
@@ -139,6 +139,25 @@ if [ "$(tr -d '[:space:]' <"$ROOT1/state/hints" 2>/dev/null)" = "2" ]; then
     ok "invalid hint request does not increment the counter"
 else
     bad "rejected hint request changed the counter"
+fi
+
+expect_rc "out-of-range hint request is clamped" 0 run1 hint 99
+expect_contains "out-of-range hint warns about available pages" \
+    "Stage 1 has 3 hint(s); showing all of them." "$OUT"
+expect_contains "out-of-range hint still shows every hint" "Hint 3/3" "$OUT"
+if [ "$(tr -d '[:space:]' <"$ROOT1/state/hints" 2>/dev/null)" = "2" ]; then
+    ok "out-of-range hint does not increment the counter"
+else
+    bad "out-of-range hint changed the counter"
+fi
+
+expect_rc "oversized hint request is clamped" 0 run1 hint 2147483648
+expect_contains "oversized hint warns about available pages" \
+    "Stage 1 has 3 hint(s); showing all of them." "$OUT"
+if [ "$(tr -d '[:space:]' <"$ROOT1/state/hints" 2>/dev/null)" = "2" ]; then
+    ok "oversized hint does not increment the counter"
+else
+    bad "oversized hint changed the counter"
 fi
 
 printf '\n== records carry mode and hints_used ==\n'
@@ -254,7 +273,9 @@ printf '\n== make best MODE wiring ==\n'
 HOST_STATE=$WORK/host-state
 mkdir -p "$HOST_STATE"
 cp "$COMBINED" "$HOST_STATE/records.jsonl"
-MAKE_ALL=$(make -C "$REPO_DIR" --no-print-directory -s best STATE="$HOST_STATE")
+# MODE= is explicit so an outer `make test MODE=...` cannot leak into the
+# nested make and turn this no-filter check into a filtered one.
+MAKE_ALL=$(make -C "$REPO_DIR" --no-print-directory -s best STATE="$HOST_STATE" MODE=)
 MAKE_TERM=$(make -C "$REPO_DIR" --no-print-directory -s best STATE="$HOST_STATE" MODE=terminal)
 MAKE_INC=$(make -C "$REPO_DIR" --no-print-directory -s best STATE="$HOST_STATE" MODE=incident)
 expect_contains "make best (no MODE) shows all modes" "incident" "$MAKE_ALL"
