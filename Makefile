@@ -18,11 +18,16 @@ SHELL := /bin/sh
 # podman (build/run/exec/ps/logs/inspect/cp/image/rm/rmi).
 ENGINE    ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 
+# Captured before MODE gets its default: `make best` with no MODE shows every
+# mode, while `make best MODE=incident|terminal` filters the leaderboard.
+MODE_ORIGIN := $(origin MODE)
+
 # MODE is the public selector. Keep the existing PROFILE values internally so
 # Docker build args and generator calls remain unchanged. PROFILE=troubleshoot
 # is accepted as an unadvertised compatibility alias for MODE=incident.
 MODE      ?= $(if $(filter troubleshoot,$(PROFILE)),incident,$(if $(filter terminal,$(PROFILE)),terminal,$(if $(PROFILE),$(PROFILE),terminal)))
 override PROFILE := $(if $(filter incident,$(MODE)),troubleshoot,$(if $(filter terminal,$(MODE)),terminal,$(MODE)))
+BEST_MODE := $(if $(filter undefined,$(MODE_ORIGIN)),,$(MODE))
 PICK      ?=
 
 ifeq ($(PROFILE),troubleshoot)
@@ -66,7 +71,7 @@ help:
 	  '  make status             container, credentials, seed, stage and record status' \
 	  '  make down               save completion records, then remove the container' \
 	  '  make new                down + up with a fresh random seed' \
-	  '  make best               local completion records, fastest first' \
+	  '  make best [MODE=...]    local records, fastest first (no MODE: all modes)' \
 	  '  make test               verifier + Incident mode smoke, up/down, clean tree' \
 	  '  make demo               re-record docs/demo/sample-run.mp4 and .gif (needs vhs)' \
 	  '  make demo-mp4           re-record only the MP4 deliverable' \
@@ -214,13 +219,15 @@ best:
 	  printf '%s/records.jsonl is empty: no run has reached the final flag yet\n' '$(STATE)'
 	  exit 0
 	fi
-	python3 tools/best.py $(STATE)/records.jsonl
+	python3 tools/best.py $(STATE)/records.jsonl $(BEST_MODE)
 
 test:
 	@printf '==> verifier smoke\n'
 	sh tests/smoke.sh
 	@printf '==> Incident mode smoke\n'
 	sh tests/troubleshoot_smoke.sh
+	@printf '==> Mode-aware records smoke\n'
+	sh tests/records_smoke.sh
 	@printf '==> up/down cycle\n'
 	$(MAKE) --no-print-directory up
 	$(MAKE) --no-print-directory down

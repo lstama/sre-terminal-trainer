@@ -24,6 +24,7 @@
  *   final.sha256             sha256 hex of the final flag
  *   state/progress           1-based current stage index
  *   state/clock              epoch seconds at first `next`
+ *   state/hints              number of hint pages shown this attempt
  *   state/stage_NN.frag      one fragment per successful check (append order)
  *   state/stage_NN.done      one check id per successful check (append order)
  *   state/records.jsonl      one JSON object per finished run
@@ -74,6 +75,7 @@ struct stage_ent {
 static struct stage_ent g_stage[MAX_STAGES];
 static int g_nstage;
 static long g_seed;
+static char g_mode[16] = "terminal";   /* MODE line; old manifests are terminal */
 
 enum check_type { CT_NONE = 0, CT_HASH, CT_FILE };
 
@@ -349,6 +351,54 @@ static int write_progress(int n)
     return 0;
 }
 
+/*
+ * Hint pages shown this attempt. Missing file means zero; malformed content is
+ * a visible error rather than a silently reset counter.
+ */
+static int read_hints_used(void)
+{
+    char p[PATH_MAX];
+    char *end;
+    long v;
+
+    if (path_state(p, sizeof(p), "hints") != 0)
+        return fail("path too long"), -1;
+    if (read_file_bounded(p, g_aux, sizeof(g_aux), NULL) != 0)
+        return 0;
+    trim_ws(g_aux);
+    if (g_aux[0] == '\0')
+        return 0;
+    errno = 0;
+    v = strtol(g_aux, &end, 10);
+    if (errno != 0 || end == g_aux || *end != '\0' || v < 0 || v > INT_MAX)
+        return fail("state/hints is corrupt"), -1;
+    return (int)v;
+}
+
+/* Count one displayed hint page; returns 0 on success. */
+static int bump_hints_used(void)
+{
+    char p[PATH_MAX];
+    char buf[32];
+    int n = read_hints_used();
+    int len;
+
+    if (n < 0)
+        return 1;
+    if (n == INT_MAX)
+        return fail("hint counter overflow");
+    if (ensure_state_dir() != 0)
+        return 1;
+    if (path_state(p, sizeof(p), "hints") != 0)
+        return fail("path too long");
+    len = snprintf(buf, sizeof(buf), "%d\n", n + 1);
+    if (len < 0 || (size_t)len >= sizeof(buf))
+        return fail("cannot format hint count");
+    if (write_file(p, buf, (size_t)len) != 0)
+        return fail("cannot write state/hints: %s", strerror(errno));
+    return 0;
+}
+
 /* Current stage, or 0 after printing an error. */
 static int current_stage(void)
 {
@@ -458,6 +508,14 @@ static int load_manifest(void)
                 return fail("manifest: malformed SEED line");
             }
             g_seed = v;
+        } else if (strncmp(p2, "MODE ", 5) == 0) {
+            const char *v = p2 + 5;
+            if (strcmp(v, "terminal") == 0 || strcmp(v, "incident") == 0) {
+                snprintf(g_mode, sizeof(g_mode), "%s", v);
+            } else {
+                free(buf);
+                return fail("manifest: unknown mode '%s'", v);
+            }
         } else if (strncmp(p2, "STAGES ", 7) == 0) {
             char *end;
             long v;
@@ -1059,7 +1117,7 @@ static int cmd_finish(const char *flag)
     char stored[65], got[65];
     char fmt[64];
     char json[4096];
-    int cur, len, i;
+    int cur, len, i, hints;
     long long epoch;
     long el;
 
@@ -1100,16 +1158,23 @@ static int cmd_finish(const char *flag)
         el = 0;
     fmt_elapsed(el, fmt, sizeof(fmt));
     epoch = (long long)time(NULL);
+    hints = read_hints_used();
+    if (hints < 0)
+        return 1;
 
     printf("=== Finished ===\n");
     printf("Seed:    %ld\n", g_seed);
+    printf("Mode:    %s\n", g_mode);
     printf("Stages:  %d\n", g_nstage);
     printf("Elapsed: %s (%ld seconds)\n", fmt, el);
+    printf("Hints:   %d page(s) shown\n", hints);
     printf("Recorded in state/records.jsonl\n");
 
+    /* Old readers ignore the two extra fields; old records stay readable. */
     len = snprintf(json, sizeof(json),
-                   "{\"epoch\":%lld,\"elapsed_seconds\":%ld,\"seed\":%ld,\"stages\":[",
-                   epoch, el, g_seed);
+                   "{\"epoch\":%lld,\"elapsed_seconds\":%ld,\"seed\":%ld,"
+                   "\"mode\":\"%s\",\"hints_used\":%d,\"stages\":[",
+                   epoch, el, g_seed, g_mode, hints);
     if (len < 0 || (size_t)len >= sizeof(json))
         return fail("cannot format record");
     for (i = 0; i < g_nstage; i++) {
@@ -1168,7 +1233,9 @@ static int cmd_hint(int argc, char **argv)
         v = strtol(argv[2], &end, 10);
         if (errno != 0 || end == argv[2] || *end != '\0' || v < 1)
             return fail("hint number must be a positive integer");
-        want = (int)v;
+        /* Clamp instead of letting the int cast wrap negative: an oversized
+         * request is handled by the "show all" path below, not as a page. */
+        want = (v > INT_MAX) ? INT_MAX : (int)v;
     }
 
     /* Hints come from stages/NN/hint (free text lines) first, then any
@@ -1211,8 +1278,14 @@ static int cmd_hint(int argc, char **argv)
         return 0;
     }
     if (want > nhints) {
+        /* Out-of-range request: warn and fall back to every available hint.
+         * No specific page was requested, so it is not counted as shown. */
         printf("Stage %d has %d hint(s); showing all of them.\n", cur, nhints);
         want = nhints;
+    } else if (bump_hints_used() != 0) {
+        /* The requested hint page was displayed: count it for this attempt's
+         * record. Invalid/out-of-range requests skip this entirely. */
+        return 1;
     }
 
     for (i = 0; i < want; i++)
@@ -1233,7 +1306,13 @@ static int cmd_status(void)
         return 1;
 
     printf("Seed:  %ld\n", g_seed);
+    printf("Mode:  %s\n", g_mode);
     printf("Stages: %d\n", g_nstage);
+    {
+        int hints = read_hints_used();
+        if (hints >= 0)
+            printf("Hints: %d page(s) shown\n", hints);
+    }
 
     if (cur > g_nstage) {
         el = elapsed_seconds();
@@ -1273,6 +1352,8 @@ static int cmd_reset(void)
         removed++;
     if (path_state(p, sizeof(p), "finished") == 0 && unlink(p) == 0)
         removed++;
+    if (path_state(p, sizeof(p), "hints") == 0 && unlink(p) == 0)
+        removed++;
     for (i = 1; i <= g_nstage; i++) {
         if (path_state_stage(p, sizeof(p), i, "frag") == 0 && unlink(p) == 0)
             removed++;
@@ -1299,7 +1380,7 @@ static void usage(FILE *out)
           "  stage                     earn this stage's flag once all checks pass\n"
           "  unlock <flag>             unlock the next stage with a stage flag\n"
           "  finish <final-flag>       record completion after the last stage\n"
-          "  hint [n]                  print hint n (default 1) for this stage\n"
+          "  hint [n]                  print hint n (default 1); counted in your record\n"
           "  status                    where you are, elapsed time, progress\n"
           "  reset                     clear your progress (not the challenge)\n",
           out);

@@ -758,10 +758,12 @@ with open(answers_path, encoding="utf-8") as fh:
 with open(os.path.join(out, "manifest"), encoding="utf-8") as fh:
     manifest = fh.read().splitlines()
 
-emit(manifest[:2] == ["SEED " + str(dump["seed"]), "STAGES %d" % expected_count],
-     "manifest header has SEED and STAGES %d" % expected_count, repr(manifest[:2]))
-emit(len(manifest) == 2 + expected_count,
-     "manifest is exactly the 2-line header plus %d stages" % expected_count,
+emit(manifest[:3] == ["MODE incident", "SEED " + str(dump["seed"]),
+                      "STAGES %d" % expected_count],
+     "manifest header has MODE incident, SEED and STAGES %d" % expected_count,
+     repr(manifest[:3]))
+emit(len(manifest) == 3 + expected_count,
+     "manifest is exactly the 3-line header plus %d stages" % expected_count,
      repr(manifest))
 stage_lines = [line[len("STAGE "):] for line in manifest if line.startswith("STAGE ")]
 if PICK:

@@ -3417,7 +3417,10 @@ def write_outputs(seed, count, out, dump_path, profile="terminal", pick=None):
     # Compiled into sremock in the builder; never installed as runtime data.
     write_valid_names(out, names)
 
-    manifest = ["SEED %d" % seed, "STAGES %d" % len(stages)]
+    # The public mode name goes in the header so a finished run's record can be
+    # attributed to it. Old manifests without MODE are read as terminal.
+    mode = "incident" if profile == "troubleshoot" else "terminal"
+    manifest = ["MODE %s" % mode, "SEED %d" % seed, "STAGES %d" % len(stages)]
     manifest += ["STAGE " + s["id"] for s in stages]
     with open(os.path.join(out, "manifest"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(manifest) + "\n")
@@ -3525,9 +3528,10 @@ def self_test(seeds, verbose=True):
 
             with open(os.path.join(tmp, "manifest"), "r", encoding="utf-8") as fh:
                 manifest = fh.read().splitlines()
-            check(manifest[0] == "SEED %d" % seed, "seed %d: manifest seed" % seed)
-            check(manifest[1] == "STAGES %d" % len(stages), "seed %d: manifest stage count" % seed)
-            check(manifest[2:] == ["STAGE " + s["id"] for s in stages],
+            check(manifest[0] == "MODE terminal", "seed %d: terminal manifest mode" % seed)
+            check(manifest[1] == "SEED %d" % seed, "seed %d: manifest seed" % seed)
+            check(manifest[2] == "STAGES %d" % len(stages), "seed %d: manifest stage count" % seed)
+            check(manifest[3:] == ["STAGE " + s["id"] for s in stages],
                   "seed %d: manifest stage order" % seed)
 
             for idx, stage in enumerate(stages, 1):
@@ -3649,7 +3653,8 @@ def self_test(seeds, verbose=True):
                       "seed %d: troubleshoot final flag is not the last stage flag" % seed)
                 with open(os.path.join(ts_tmp, "manifest"), "r", encoding="utf-8") as fh:
                     ts_manifest = fh.read().splitlines()
-                check(ts_manifest == ["SEED %d" % seed, "STAGES %d" % len(TROUBLESHOOT_IDS)]
+                check(ts_manifest == ["MODE incident", "SEED %d" % seed,
+                                      "STAGES %d" % len(TROUBLESHOOT_IDS)]
                       + ["STAGE " + tid for tid in TROUBLESHOOT_IDS],
                       "seed %d: troubleshoot manifest mismatch: %r" % (seed, ts_manifest))
 
