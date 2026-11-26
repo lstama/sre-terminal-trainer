@@ -37,7 +37,7 @@ COPY src/ ./src/
 
 # Output contract consumed below:
 #   /generated/fs/            challenge files at container-absolute paths
-#   /generated/manifest       SEED / STAGES / STAGE lines
+#   /generated/manifest       MODE / SEED / STAGES / STAGE lines
 #   /generated/stages/NN/     instruction, hint, checks.tsv, flag.sha256
 #   /generated/final.sha256   sha256 of the final flag
 #   /generated/valid_names.inc builder-only C table for sremock name validation

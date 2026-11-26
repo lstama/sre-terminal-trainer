@@ -47,17 +47,20 @@ Finish the last stage with `verify finish <final-flag>`, log out, then:
 
 ```sh
 make down        # copy completion records to state/records.jsonl, remove the container
-make best        # your local runs, fastest first
+make best        # all local runs, fastest first
+make best MODE=incident  # just the Incident mode runs
 ```
 
 For Incident mode, repeat `MODE=incident` on later host commands, for example `make down MODE=incident`, `make status MODE=incident` or `make new MODE=incident`. Match `ENGINE` and `PORT` too if you overrode them. `make new` starts a fresh seeded set; `make help` lists every target.
+
+Each finished run is tagged with its mode and the number of hint pages you used. `make best MODE=incident` (or `MODE=terminal`) shows that mode's leaderboard; plain `make best` shows both together.
 
 ## What it is
 
 - **Randomized challenges** — a fresh, seeded set of drills each build. A given `SEED` replays the same set; `make new` picks a new one.
 - **Docker or Podman** — engine auto-detected (`podman` if on `PATH`, else `docker`); force either with `ENGINE=podman` / `ENGINE=docker`.
 - **Real toolbox practice** — `bash`, `tmux`, `nano`, `less`, `tree`, `grep`, `gawk`, `find`. No `sudo`, no compilers, no root for the trainee.
-- **Timing records** — `verify` tracks elapsed time; `make best` lists your local runs, fastest first.
+- **Timing records** — `verify` tracks elapsed time, the mode you played and how many hint pages you opened; `make best` lists all local runs fastest first, and `make best MODE=incident` filters to one mode's best times.
 
 > **Spoiler policy.** This README never gives answers or seed-specific facts. The answer key is generated in the container *build* stage and deleted before the runtime image is assembled — the image holds hashes only.
 
@@ -75,7 +78,7 @@ For Incident mode, repeat `MODE=incident` on later host commands, for example `m
 | `make status` | Container state, credentials path, seed, port and saved records. |
 | `make down` | Copy completion records to `state/`, then stop and remove the container. |
 | `make new` | `down`, then `up` with a fresh seed. |
-| `make best` | Local records, fastest first. |
+| `make best [MODE=terminal\|incident]` | Local records, fastest first; `MODE` filters to that mode (default: all modes). Output has mode and hint-page columns. |
 | `make test` | Run the Terminal mode and Incident mode smoke suites, then one up/down cycle; assert the working tree is clean. |
 | `make clean` | Remove the container, image, `.instance/` and `state/`. |
 

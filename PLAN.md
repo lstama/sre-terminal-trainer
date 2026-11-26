@@ -60,14 +60,17 @@ egress); the drills are all local files.
   `[--mode terminal|incident]`; `--self-test SEEDS` regenerates a full set per seed and
   re-derives every answer from the artefacts on disk.
 - Generator output: `fs/` mirrors container-absolute paths; `manifest` is line based
-  (`SEED n`, `STAGES n`, `STAGE <id>` repeated); `stages/NN/{instruction,hint,checks.tsv,
-  flag.sha256}`; `final.sha256`.
+  (`MODE <terminal|incident>`, `SEED n`, `STAGES n`, `STAGE <id>` repeated; a missing MODE
+  line is read as `terminal` for backward compatibility); `stages/NN/{instruction,hint,
+  checks.tsv,flag.sha256}`; `final.sha256`.
 - Verifier CLI: `next`, `check <id> <answer>`, `stage`, `unlock <flag>`,
   `finish <final-flag>`, `hint [n]`, `status`, `reset`, `--help`.
-- State: `/var/lib/sre-trainer/state/{progress,clock,stage_NN.frag,stage_NN.done,
-  finished,records.jsonl}`; records are `{"epoch","elapsed_seconds","seed","stages"}`.
+- State: `/var/lib/sre-trainer/state/{progress,clock,hints,stage_NN.frag,stage_NN.done,
+  finished,records.jsonl}`; records are
+  `{"epoch","elapsed_seconds","seed","mode","hints_used","stages"}` (old records without
+  the two new fields stay readable). `hints` counts hint pages shown this attempt;
   `finished` marks a recorded run so a second `verify finish` cannot append a duplicate;
-  `verify reset` clears it along with the progress files.
+  `verify reset` clears both it and the hint count along with the progress files.
 - Host creds: `.instance/creds` with `SSH_USER=`/`SSH_PASSWORD=` lines, mode 0600.
 
 ## Decisions
@@ -122,9 +125,18 @@ egress); the drills are all local files.
 | T46 | Mock aliases, seed-validated not-found errors and fixture-free command help | done |
 | T48 | Bare kubectl list aliases and accurate df help text | done |
 | T53 | Terminal mode / Incident mode naming, hidden aliases and README restructure | done |
+| T56 | Mode-aware timing records (`MODE` manifest header, `state/hints`, per-mode `make best`) | done |
 
 ## Open questions
 
 - Should the host keep a merged (append across sessions) record log instead of the last
   container's records? Current behaviour: each `make down` replaces `state/records.jsonl`.
 - Should `make up` also print the stage instruction titles, or is the stage id list enough?
+
+## Future improvements
+
+Ranked by value; each line is a one-line scope plus its rationale.
+
+1. **Polishment** — Consolidate the duplicated two-mode README bullets and add a "start with Terminal mode, then Incident mode" line; rationale: the intro repeats each mode twice and never tells newcomers which mode to try first.
+2. **Feature completeness** — Mode-aware timing records and per-mode best times (this task); rationale: records had no mode, so `make best` mixed Terminal and Incident runs in one leaderboard. **DONE (T56).**
+3. **New feature** — Exam simulation (`make exam MODE=incident SET=8`) with hints disabled/counted and a scorecard + replay command; rationale: a timed, hint-free run with repeatable grading is the natural next step now that per-mode records exist.
